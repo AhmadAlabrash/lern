@@ -16,11 +16,31 @@ export async function PATCH(request: Request, { params }: { params: { id: string
     const telegramChatId = body.telegram_chat_id !== undefined ? (body.telegram_chat_id ?? '').trim() || null : undefined;
     const notifyEmail = body.notify_email !== undefined ? Boolean(body.notify_email) : undefined;
     const notifyTelegram = body.notify_telegram !== undefined ? Boolean(body.notify_telegram) : undefined;
+    const notifySms = body.notify_sms !== undefined ? Boolean(body.notify_sms) : undefined;
+    const bookingUrl = body.booking_url !== undefined ? (body.booking_url ?? '').trim() || null : undefined;
+    const whatsappNumber = body.whatsapp_number !== undefined ? (body.whatsapp_number ?? '').trim() || null : undefined;
+    const smsProvider =
+      body.sms_provider !== undefined
+        ? body.sms_provider === 'future_provider'
+          ? 'future_provider'
+          : 'twilio'
+        : undefined;
+    const plan =
+      body.plan !== undefined
+        ? body.plan === 'pro' || body.plan === 'ultimate'
+          ? body.plan
+          : 'free'
+        : undefined;
     if (
       email === undefined &&
       telegramChatId === undefined &&
       notifyEmail === undefined &&
-      notifyTelegram === undefined
+      notifyTelegram === undefined &&
+      notifySms === undefined &&
+      bookingUrl === undefined &&
+      whatsappNumber === undefined &&
+      smsProvider === undefined &&
+      plan === undefined
     ) {
       return NextResponse.json({ success: false, error: 'No changes provided' }, { status: 400 });
     }
@@ -29,6 +49,11 @@ export async function PATCH(request: Request, { params }: { params: { id: string
     if (telegramChatId !== undefined) updateFields.telegram_chat_id = telegramChatId;
     if (notifyEmail !== undefined) updateFields.notify_email = notifyEmail;
     if (notifyTelegram !== undefined) updateFields.notify_telegram = notifyTelegram;
+    if (notifySms !== undefined) updateFields.notify_sms = notifySms;
+    if (bookingUrl !== undefined) updateFields.booking_url = bookingUrl;
+    if (whatsappNumber !== undefined) updateFields.whatsapp_number = whatsappNumber;
+    if (smsProvider !== undefined) updateFields.sms_provider = smsProvider;
+    if (plan !== undefined) updateFields.plan = plan;
     const supabase = createServiceSupabaseClient();
     const { data, error } = await supabase.from('webhook_users').update(updateFields).eq('id', id).select().single();
     if (error) {

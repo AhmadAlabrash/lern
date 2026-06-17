@@ -1,37 +1,56 @@
 import nodemailer from 'nodemailer';
+import { getSettingsMap } from './settings';
 
 /**
- * Create a reusable Nodemailer transporter. The SMTP configuration is loaded
- * from environment variables. Do not expose any of these secrets on the client.
+ * Create a reusable Nodemailer transporter. It prefers admin dashboard settings
+ * stored in Supabase and falls back to environment variables.
  */
-function createTransporter() {
-  const host = process.env.SMTP_HOST;
-  const port = parseInt(process.env.SMTP_PORT || '587', 10);
-  const secureRaw = process.env.SMTP_SECURE ?? 'false';
-  const secure = secureRaw === 'true' || secureRaw === '1';
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
+async function getSmtpConfig() {
+  const settings = await getSettingsMap([
+    'smtp.host',
+    'smtp.port',
+    'smtp.secure',
+    'smtp.user',
+    'smtp.pass',
+    'smtp.from',
+  ]);
 
-  if (!host || !user || !pass) {
+  const host = settings['smtp.host'] || process.env.SMTP_HOST || '';
+  const port = parseInt(settings['smtp.port'] || process.env.SMTP_PORT || '587', 10);
+  const secureRaw = settings['smtp.secure'] || process.env.SMTP_SECURE || 'false';
+  const secure = secureRaw === 'true' || secureRaw === '1';
+  const user = settings['smtp.user'] || process.env.SMTP_USER || '';
+  const pass = settings['smtp.pass'] || process.env.SMTP_PASS || '';
+  const from = settings['smtp.from'] || process.env.SMTP_FROM || user;
+
+  return { host, port, secure, user, pass, from };
+}
+
+async function createTransporter() {
+  const config = await getSmtpConfig();
+
+  if (!config.host || !config.user || !config.pass) {
     throw new Error('SMTP configuration is incomplete');
   }
 
   return nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass },
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    auth: { user: config.user, pass: config.pass },
   });
 }
 
-export function getSmtpConfigStatus() {
+export async function getSmtpConfigStatus() {
+  const config = await getSmtpConfig();
+
   return {
-    configured: Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS),
-    host: process.env.SMTP_HOST || '',
-    port: process.env.SMTP_PORT || '',
-    secure: process.env.SMTP_SECURE || '',
-    user: maskValue(process.env.SMTP_USER || ''),
-    from: process.env.SMTP_FROM || '',
+    configured: Boolean(config.host && config.user && config.pass),
+    host: config.host,
+    port: String(config.port),
+    secure: String(config.secure),
+    user: maskValue(config.user),
+    from: config.from,
   };
 }
 
@@ -39,71 +58,43 @@ export function getSmtpConfigStatus() {
  * Send a German, branded email containing the webhook secret.
  */
 export async function sendSecretEmail(to: string, secret: string) {
-  const transporter = createTransporter();
-  const from = process.env.SMTP_FROM || process.env.SMTP_USER || '';
-  const subject = 'Ihr Webhook-Zugang für KI-Rezeption';
-
+  const transporter = await createTransporter();
+  const { from } = await getSmtpConfig();
   const appBaseUrl = (process.env.APP_BASE_URL || '').replace(/\/$/, '');
   const webhookEndpoint = appBaseUrl ? `${appBaseUrl}/api/webhook` : '/api/webhook';
 
-  const safeSecret = escapeHtml(secret);
-  const safeEndpoint = escapeHtml(webhookEndpoint);
+  const settings = await getSettingsMap(['template.secret_email_subject', 'template.secret_email_text']);
+  const subject = renderSimpleTemplate(
+    settings['template.secret_email_subject'] || 'Ihr Webhook-Zugang für KI-Rezeption',
+    {
+      secret,
+      email: to,
+      app_base_url: appBaseUrl,
+      webhook_endpoint: webhookEndpoint,
+    }
+  );
 
-  const text = `Guten Tag,
+  const text = renderSimpleTemplate(settings['template.secret_email_text'], {
+    secret,
+    email: to,
+    app_base_url: appBaseUrl,
+    webhook_endpoint: webhookEndpoint,
+  });
 
-Ihr persönlicher Webhook-Zugang für KI-Rezeption wurde eingerichtet.
-
-Ihr geheimer Token:
-${secret}
-
-Bitte verwenden Sie diesen Token als Bearer Token, wenn Sie Webhook-Ereignisse an unsere API senden.
-
-Webhook-Endpunkt:
-${webhookEndpoint}
-
-Beispiel:
-Authorization: Bearer ${secret}
-
-Bitte behandeln Sie diesen Token vertraulich und geben Sie ihn nicht öffentlich weiter.
-
-Freundliche Grüße
-KI-Rezeption`;
+  const safeText = escapeHtml(text).replaceAll('\n', '<br />');
 
   const html = createBrandedEmailHtml({
     eyebrow: 'KI-Rezeption',
     title: 'Ihr Webhook-Zugang ist bereit',
-    intro:
-      'Nutzen Sie den folgenden Token, um Webhook-Ereignisse sicher an Ihre KI-Rezeption zu senden.',
+    intro: 'Diese Nachricht enthält den persönlichen Webhook-Token.',
     bodyHtml: `
-      <p style="margin:0 0 18px 0;font-size:16px;line-height:1.7;color:#334155;">Guten Tag,</p>
-      <p style="margin:0 0 24px 0;font-size:16px;line-height:1.7;color:#334155;">
-        Ihr persönlicher Webhook-Zugang wurde erfolgreich eingerichtet.
-        Bitte verwenden Sie diesen geheimen Token als <strong>Bearer Token</strong> bei allen Webhook-Anfragen.
-      </p>
-      <div style="margin:0 0 24px 0;padding:20px;border-radius:18px;background:#f8fafc;border:1px solid #e2e8f0;">
-        <div style="font-size:13px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:10px;">Ihr geheimer Token</div>
-        <div style="font-family:Consolas,Monaco,monospace;font-size:14px;line-height:1.6;color:#0f172a;background:#ffffff;border:1px solid #dbe4ee;border-radius:14px;padding:14px;word-break:break-all;">
-          ${safeSecret}
-        </div>
+      <div style="margin:0 0 24px 0;padding:22px;border-radius:18px;background:#f8fafc;border:1px solid #e2e8f0;">
+        <div style="font-size:15px;line-height:1.8;color:#0f172a;word-break:break-word;">${safeText}</div>
       </div>
       <div style="margin:0 0 24px 0;padding:18px;border-radius:18px;background:#eef2ff;border:1px solid #c7d2fe;">
         <div style="font-size:13px;font-weight:700;color:#3730a3;margin-bottom:8px;">Webhook-Endpunkt</div>
-        <div style="font-family:Consolas,Monaco,monospace;font-size:14px;color:#312e81;word-break:break-all;">${safeEndpoint}</div>
+        <div style="font-family:Consolas,Monaco,monospace;font-size:14px;color:#312e81;word-break:break-all;">${escapeHtml(webhookEndpoint)}</div>
       </div>
-      <p style="margin:0 0 10px 0;font-size:15px;line-height:1.7;color:#334155;">
-        Beispiel für den Authorization Header:
-      </p>
-      <div style="margin:0 0 24px 0;font-family:Consolas,Monaco,monospace;font-size:14px;line-height:1.6;background:#0f172a;color:#e2e8f0;border-radius:14px;padding:14px;word-break:break-all;">
-        Authorization: Bearer ${safeSecret}
-      </div>
-      <p style="margin:0 0 24px 0;font-size:14px;line-height:1.7;color:#64748b;">
-        Bitte behandeln Sie diesen Token vertraulich. Wenn Sie den Verdacht haben, dass der Token öffentlich geworden ist,
-        lassen Sie bitte einen neuen Zugang erstellen.
-      </p>
-      <p style="margin:0;font-size:16px;line-height:1.7;color:#334155;">
-        Freundliche Grüße<br />
-        <strong>KI-Rezeption</strong>
-      </p>
     `,
   });
 
@@ -114,8 +105,8 @@ KI-Rezeption`;
  * Send the same formatted call notification by email when a webhook event arrives.
  */
 export async function sendWebhookNotificationEmail(to: string, messageText: string, phone?: string) {
-  const transporter = createTransporter();
-  const from = process.env.SMTP_FROM || process.env.SMTP_USER || '';
+  const transporter = await createTransporter();
+  const { from } = await getSmtpConfig();
   const subject = 'Neue Benachrichtigung von KI-Rezeption';
 
   const cleanPhone = normalizePhoneForTelUrl(phone || '');
@@ -156,8 +147,8 @@ Diese Nachricht wurde automatisch von KI-Rezeption erstellt.`;
 }
 
 export async function sendSmtpTestEmail(to: string) {
-  const transporter = createTransporter();
-  const from = process.env.SMTP_FROM || process.env.SMTP_USER || '';
+  const transporter = await createTransporter();
+  const { from } = await getSmtpConfig();
   const subject = 'SMTP-Test von KI-Rezeption';
 
   const text = `Guten Tag,
@@ -187,6 +178,27 @@ KI-Rezeption`;
   });
 
   return transporter.sendMail({ from, to, subject, text, html });
+}
+
+
+export async function sendOperationalAlertEmail(to: string, messageText: string) {
+  const transporter = await createTransporter();
+  const { from } = await getSmtpConfig();
+  const subject = 'KI-Rezeption Fehleralarm';
+  const safeMessage = escapeHtml(messageText).replaceAll('\n', '<br />');
+
+  const html = createBrandedEmailHtml({
+    eyebrow: 'KI-Rezeption Monitor',
+    title: 'Fehleralarm',
+    intro: 'Ein Zustellfehler wurde erkannt.',
+    bodyHtml: `
+      <div style="margin:0 0 24px 0;padding:20px;border-radius:18px;background:#fff1f2;border:1px solid #fecdd3;">
+        <div style="font-size:15px;line-height:1.75;color:#881337;">${safeMessage}</div>
+      </div>
+    `,
+  });
+
+  return transporter.sendMail({ from, to, subject, text: messageText, html });
 }
 
 function createBrandedEmailHtml({
@@ -237,6 +249,12 @@ function createBrandedEmailHtml({
     </table>
   </body>
 </html>`;
+}
+
+function renderSimpleTemplate(template: string, values: Record<string, string>) {
+  return Object.entries(values).reduce((text, [key, value]) => {
+    return text.replaceAll(`{${key}}`, value || '');
+  }, template || '');
 }
 
 function normalizePhoneForTelUrl(phone: string) {

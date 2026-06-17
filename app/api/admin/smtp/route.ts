@@ -9,8 +9,8 @@ export async function GET() {
 
   return NextResponse.json({
     success: true,
-    smtp: getSmtpConfigStatus(),
+    smtp: await getSmtpConfigStatus(),
     note:
-      'On Vercel, environment variables cannot be edited safely from the app at runtime. Update SMTP values in Vercel Project Settings → Environment Variables, then redeploy.',
+      'SMTP can be configured globally in the Routing & API tab. If a dashboard value is empty, the app falls back to environment variables.',
   });
 }

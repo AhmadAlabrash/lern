@@ -1,17 +1,16 @@
+import { getSettingsMap } from './settings';
+
 type TelegramReplyMarkup = {
   inline_keyboard: Array<Array<{ text: string; url: string }>>;
 };
 
-/**
- * Send a text message to a Telegram chat via the Bot API. The bot token
- * must be provided in the environment variable `TELEGRAM_BOT_TOKEN`.
- */
 export async function sendTelegramMessage(
   chatId: string,
   text: string,
   replyMarkup?: TelegramReplyMarkup
 ) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const settings = await getSettingsMap(['telegram.bot_token']);
+  const token = settings['telegram.bot_token'] || process.env.TELEGRAM_BOT_TOKEN;
 
   if (!token) {
     throw new Error('Telegram bot token is not configured');

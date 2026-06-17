@@ -11,6 +11,12 @@ export default function CreateUserForm({ onSuccess }: Props) {
   const [telegramChatId, setTelegramChatId] = useState('');
   const [notifyEmail, setNotifyEmail] = useState(true);
   const [notifyTelegram, setNotifyTelegram] = useState(true);
+  const [notifySms, setNotifySms] = useState(false);
+  const [bookingUrl, setBookingUrl] = useState('');
+  const [whatsappNumber, setWhatsappNumber] = useState('');
+  const [smsProvider, setSmsProvider] = useState<'twilio' | 'future_provider'>('twilio');
+  const [sendSecretEmailNow, setSendSecretEmailNow] = useState(false);
+  const [plan, setPlan] = useState<'free' | 'pro' | 'ultimate'>('free');
   const [loading, setLoading] = useState(false);
   const [resendLoading, setResendLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -31,6 +37,12 @@ export default function CreateUserForm({ onSuccess }: Props) {
           telegram_chat_id: telegramChatId,
           notify_email: notifyEmail,
           notify_telegram: notifyTelegram,
+          notify_sms: notifySms,
+          booking_url: bookingUrl,
+          whatsapp_number: whatsappNumber,
+          sms_provider: smsProvider,
+          send_secret_email: sendSecretEmailNow,
+          plan,
         }),
       });
 
@@ -46,9 +58,17 @@ export default function CreateUserForm({ onSuccess }: Props) {
       setTelegramChatId('');
       setNotifyEmail(true);
       setNotifyTelegram(true);
+      setNotifySms(false);
+      setBookingUrl('');
+      setWhatsappNumber('');
+      setSmsProvider('twilio');
+      setSendSecretEmailNow(false);
+      setPlan('free');
       setMessage({
         type: 'success',
-        text: 'User created. The secret was generated and the email was sent.',
+        text: json.secretEmailSent
+          ? 'User created. The secret was generated and emailed to the user.'
+          : 'User created. The secret was generated but not emailed.',
       });
 
       await onSuccess?.();
@@ -102,7 +122,7 @@ export default function CreateUserForm({ onSuccess }: Props) {
           Generate a webhook secret
         </h2>
         <p className="mt-2 text-sm text-slate-500">
-          Create a user, email the secret automatically and optionally connect their Telegram chat.
+          Create a user, choose whether to email the secret now, and configure Telegram, email and SMS delivery.
         </p>
       </div>
 
@@ -136,6 +156,49 @@ export default function CreateUserForm({ onSuccess }: Props) {
           </Field>
         </div>
 
+        <div className="grid gap-5 md:grid-cols-2">
+          <Field
+            label="User plan"
+            description="Default is free. SMS monthly limits are configured globally."
+          >
+            <select
+              value={plan}
+              onChange={(event) => setPlan(event.target.value as 'free' | 'pro' | 'ultimate')}
+              className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+            >
+              <option value="free">Free</option>
+              <option value="pro">Pro</option>
+              <option value="ultimate">Ultimate</option>
+            </select>
+          </Field>
+
+          <Field
+            label="Booking appointment link"
+            description="Used in the SMS sent to the caller."
+          >
+            <input
+              type="url"
+              value={bookingUrl}
+              onChange={(event) => setBookingUrl(event.target.value)}
+              className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+              placeholder="https://example.com/book"
+            />
+          </Field>
+
+          <Field
+            label="WhatsApp business number"
+            description="Used to build a WhatsApp help link in the SMS."
+          >
+            <input
+              type="text"
+              value={whatsappNumber}
+              onChange={(event) => setWhatsappNumber(event.target.value)}
+              className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+              placeholder="+491701234567"
+            />
+          </Field>
+        </div>
+
         <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5">
           <div className="text-sm font-semibold text-slate-900">Delivery preferences</div>
           <p className="mt-1 text-xs text-slate-500">
@@ -155,7 +218,37 @@ export default function CreateUserForm({ onSuccess }: Props) {
               title="Telegram notifications"
               description="Send the German event message to the configured Telegram chat_id."
             />
+            <ToggleCard
+              checked={notifySms}
+              onChange={setNotifySms}
+              title="SMS follow-up"
+              description="Send a short appointment/WhatsApp SMS to the caller number from the event."
+            />
           </div>
+
+          <label className="mt-4 block">
+            <span className="text-sm font-semibold text-slate-900">SMS provider</span>
+            <span className="mt-1 block text-xs text-slate-500">
+              Twilio is active now. The second provider is reserved for later.
+            </span>
+            <select
+              value={smsProvider}
+              onChange={(event) => setSmsProvider(event.target.value as 'twilio' | 'future_provider')}
+              className="mt-3 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+            >
+              <option value="twilio">Twilio</option>
+              <option value="future_provider">Future provider</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="rounded-3xl border border-violet-200 bg-violet-50 p-5">
+          <ToggleCard
+            checked={sendSecretEmailNow}
+            onChange={setSendSecretEmailNow}
+            title="Send secret email now"
+            description="If enabled, the user receives the generated secret immediately. If disabled, you can copy it or send it later from the Users tab."
+          />
         </div>
 
         {message && <Alert type={message.type}>{message.text}</Alert>}
@@ -166,7 +259,7 @@ export default function CreateUserForm({ onSuccess }: Props) {
             disabled={loading}
             className="rounded-2xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-100 transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-70"
           >
-            {loading ? 'Creating user…' : 'Create user and send email'}
+            {loading ? 'Creating user…' : sendSecretEmailNow ? 'Create user and send email' : 'Create user only'}
           </button>
           <p className="text-xs text-slate-500">
             Secrets are generated server-side using strong random bytes.

@@ -20,3 +20,65 @@ textarea,
 select {
   font: inherit;
 }
+
+/* Admin theme toggle. These overrides keep the markup simple while allowing a real dark mode. */
+.theme-dark {
+  background: #020617 !important;
+  color: #e5e7eb !important;
+  color-scheme: dark;
+}
+
+.theme-dark .bg-white,
+.theme-dark .bg-slate-50,
+.theme-dark .bg-slate-100 {
+  background-color: #0f172a !important;
+}
+
+.theme-dark .bg-[#f3f5f9] {
+  background-color: #020617 !important;
+}
+
+.theme-dark .border-slate-100,
+.theme-dark .border-slate-200,
+.theme-dark .border-slate-300 {
+  border-color: #1e293b !important;
+}
+
+.theme-dark .text-slate-950,
+.theme-dark .text-slate-900,
+.theme-dark .text-slate-800,
+.theme-dark .text-slate-700 {
+  color: #f8fafc !important;
+}
+
+.theme-dark .text-slate-600,
+.theme-dark .text-slate-500,
+.theme-dark .text-slate-400 {
+  color: #94a3b8 !important;
+}
+
+.theme-dark input,
+.theme-dark textarea,
+.theme-dark select,
+.theme-dark code {
+  background-color: #020617 !important;
+  border-color: #334155 !important;
+  color: #f8fafc !important;
+}
+
+.theme-dark input::placeholder,
+.theme-dark textarea::placeholder {
+  color: #64748b !important;
+}
+
+.theme-dark .shadow-sm,
+.theme-dark .shadow-md,
+.theme-dark .shadow-lg,
+.theme-dark .shadow-2xl {
+  box-shadow: none !important;
+}
+
+.theme-dark .hover\:bg-slate-50:hover,
+.theme-dark .hover\:bg-slate-100:hover {
+  background-color: #1e293b !important;
+}

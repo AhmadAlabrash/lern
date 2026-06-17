@@ -97,6 +97,43 @@ export function formatWebhookToGermanMessage(payload: any): string {
   return lines.join('\n');
 }
 
+export function renderWebhookTemplate(payload: any, template: string): string {
+  const data = payload?.data || {};
+  const call = data?.call || {};
+  const contact = data?.contact || {};
+
+  const values: Record<string, string> = {
+    event: cleanText(payload?.event),
+    contact_name: cleanText(contact?.name) || 'Ein Nutzer',
+    contact_phone: cleanText(contact?.phone || data?.phone),
+    contact_email: cleanText(contact?.email),
+    company: cleanText(contact?.company),
+    address: cleanText(contact?.address || data?.address),
+    summary: cleanText(call?.summary || data?.message || payload?.message),
+    status: cleanText(call?.status),
+    duration_minutes: cleanText(call?.durationMinutes ?? (call?.duration ? Math.round(call.duration / 60) : '')),
+    classification: cleanText(call?.classification),
+    sentiment: cleanText(call?.sentiment),
+    recording_url: cleanText(call?.recordingUrl),
+    timestamp: formatGermanTimestamp(payload?.timestamp),
+  };
+
+  return cleanupRenderedTemplate(
+    Object.entries(values).reduce((text, [key, value]) => {
+      return text.replaceAll(`{${key}}`, value);
+    }, template || '')
+  );
+}
+
+function cleanupRenderedTemplate(text: string) {
+  return text
+    .split('\n')
+    .filter((line) => !line.match(/^\s*(Name|Telefon|E-Mail|Firma|Adresse|Status|Dauer|Klassifizierung|Stimmung):\s*$/i))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export function extractPhoneFromWebhook(payload: any): string {
   if (!payload || typeof payload !== 'object') return '';
 

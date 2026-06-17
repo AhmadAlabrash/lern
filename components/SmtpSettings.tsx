@@ -89,12 +89,10 @@ export default function SmtpSettings() {
       <div className="space-y-6 px-6 py-6">
         {message && <Alert type={message.type}>{message.text}</Alert>}
 
-        <div className="rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-800">
-          <div className="font-semibold">Important for Vercel</div>
+        <div className="rounded-3xl border border-violet-200 bg-violet-50 p-5 text-sm text-violet-800">
+          <div className="font-semibold">Central settings</div>
           <p className="mt-2 leading-6">
-            Environment variables cannot be safely edited from the app at runtime on Vercel.
-            To change SMTP credentials, update them in Vercel Project Settings → Environment
-            Variables and then redeploy the project.
+            SMTP credentials can be edited in the Routing & API tab. Empty dashboard values fall back to Vercel Environment Variables.
           </p>
         </div>
 
