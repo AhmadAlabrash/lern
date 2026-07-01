@@ -68,15 +68,26 @@ In the admin dashboard, open **Routing & API → Event Routing**.
 
 Each channel has a list of event names, one per line.
 
-Example Telegram events:
+Example Telegram / email events:
 
 ```text
+webhook.test
+inbound_call.completed
+inbound_call.failed
+inbound_call.missed
+appointment.needed
 appointment.confirmed
 appointment.cancelled
 appointment.canceled
 ```
 
 Example SMS events:
+
+```text
+appointment.needed
+```
+
+SMS should usually stay limited to:
 
 ```text
 appointment.needed
@@ -92,18 +103,32 @@ Available placeholders:
 
 ```text
 {event}
+{direction}
+{status}
+{duration}
+{duration_seconds}
+{duration_minutes}
 {contact_name}
 {contact_phone}
 {contact_email}
 {company}
 {address}
+{from_number}
+{to_number}
+{phone_number}
 {summary}
-{status}
-{duration_minutes}
-{classification}
-{sentiment}
+{ai_summary}
+{transcript}
 {recording_url}
 {timestamp}
+{started_at}
+{ended_at}
+{call_id}
+{conversation_id}
+{call_sid}
+{agent_id}
+{classification}
+{sentiment}
 {booking_url}
 {whatsapp_link}
 {whatsapp_number}
@@ -195,6 +220,36 @@ Response example:
   }
 }
 ```
+
+### Real inbound call payload example
+
+The app now also understands the real call payload shape:
+
+```json
+{
+  "event": "inbound_call.completed",
+  "timestamp": "2026-07-01T14:00:33.591Z",
+  "data": {
+    "callId": "243a9a2a-e62e-485e-80ca-cde54b07cc84",
+    "conversationId": "conv_7701kwezp28rfywtdte14kev65qc",
+    "callSid": "SCL_bcnqoUSz6VoL",
+    "direction": "inbound",
+    "status": "completed",
+    "fromNumber": "+4917662410040",
+    "toNumber": "493052014446",
+    "phoneNumber": "+4917662410040",
+    "duration": 11,
+    "transcript": "AGENT (0s): Hello! how can i help you today",
+    "aiSummary": "The agent greeted the caller and offered help.",
+    "recordingUrl": null,
+    "startedAt": "2026-07-01T14:00:22.558Z",
+    "endedAt": "2026-07-01T14:00:33.558Z"
+  }
+}
+```
+
+For existing deployments, run `supabase-call-webhook-fix.sql` once in Supabase after deploying the code. This updates routing and templates so `inbound_call.completed` triggers email/Telegram notifications.
+
 
 ## Deploy to Vercel
 

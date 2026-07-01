@@ -1,13 +1,16 @@
 import { createServiceSupabaseClient } from './supabase';
 
 export const SETTINGS_DEFAULTS: Record<string, string> = {
-  'routing.telegram_events': 'webhook.test\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
-  'routing.email_events': 'webhook.test\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
+  'routing.telegram_events': 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
+  'routing.email_events': 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
   'routing.sms_events': 'appointment.needed',
 
-  'template.telegram': `📞 Neuer Anruf
+  'template.telegram': `📞 Neuer Anruf eingegangen
 
-{contact_name} hat Sie angerufen.
+Event: {event}
+Richtung: {direction}
+Status: {status}
+Dauer: {duration}
 
 👤 Kontakt:
 Name: {contact_name}
@@ -15,46 +18,69 @@ Telefon: {contact_phone}
 E-Mail: {contact_email}
 Firma: {company}
 
-📝 Zusammenfassung:
-{summary}
-
-📊 Details:
-Status: {status}
-Dauer: {duration_minutes} Minuten
-Klassifizierung: {classification}
-Stimmung: {sentiment}
+📞 Nummern:
+Anrufer: {from_number}
+Angerufene Nummer: {to_number}
 
 🕒 Zeitpunkt:
 {timestamp}
+
+📝 Zusammenfassung:
+{summary}
+
+💬 Transkript:
+{transcript}
+
+🔗 Aufnahme:
+{recording_url}
+
+🧾 IDs:
+Call ID: {call_id}
+Conversation ID: {conversation_id}
+Call SID: {call_sid}
+Agent ID: {agent_id}
 
 📞 Rückruf:
 {contact_phone}
 
 KI-Rezeption – Ihre digitale Rezeption`,
 
-  'template.email': `📞 Neuer Anruf
+  'template.email': `📞 Neuer Anruf eingegangen
 
-{contact_name} hat Sie angerufen.
+Event: {event}
+Richtung: {direction}
+Status: {status}
+Dauer: {duration}
 
-Kontakt:
+👤 Kontakt:
 Name: {contact_name}
 Telefon: {contact_phone}
 E-Mail: {contact_email}
 Firma: {company}
 
-Zusammenfassung:
-{summary}
+📞 Nummern:
+Anrufer: {from_number}
+Angerufene Nummer: {to_number}
 
-Details:
-Status: {status}
-Dauer: {duration_minutes} Minuten
-Klassifizierung: {classification}
-Stimmung: {sentiment}
-
-Zeitpunkt:
+🕒 Zeitpunkt:
 {timestamp}
 
-Rückruf:
+📝 Zusammenfassung:
+{summary}
+
+💬 Transkript:
+{transcript}
+
+🔗 Aufnahme:
+{recording_url}
+
+🧾 IDs:
+Call ID: {call_id}
+Conversation ID: {conversation_id}
+Call SID: {call_sid}
+Agent ID: {agent_id}
+
+📞 Rückruf:
 {contact_phone}
 
 KI-Rezeption – Ihre digitale Rezeption`,

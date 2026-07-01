@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createServiceSupabaseClient } from '@/lib/supabase';
 import { sendTelegramMessage } from '@/lib/telegram';
 import { sendWebhookNotificationEmail } from '@/lib/mailer';
-import { buildTelegramCallButton, extractPhoneFromWebhook, renderWebhookTemplate } from '@/lib/message';
+import { buildTelegramCallButton, extractContactNameFromWebhook, extractPhoneFromWebhook, renderWebhookTemplate } from '@/lib/message';
 import { buildCallerSmsMessage, normalizePhoneForSms, sendSms } from '@/lib/sms';
 import { getSettingsMap } from '@/lib/settings';
 import { getEventName, shouldDeliverForEvent } from '@/lib/events';
@@ -159,7 +159,7 @@ export async function POST(request: Request) {
                 template: settings['template.sms'],
                 bookingUrl: user.booking_url,
                 whatsappNumber: user.whatsapp_number,
-                contactName: payload?.data?.contact?.name,
+                contactName: extractContactNameFromWebhook(payload),
                 contactPhone: phone,
                 eventName,
               });
