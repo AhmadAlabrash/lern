@@ -116,7 +116,9 @@ export function buildWebhookTemplateValues(payload: any): Record<string, string>
   const timestamp = formatGermanTimestamp(payload?.timestamp || data?.endedAt || call?.endedAt || data?.startedAt || call?.startedAt);
 
   const summary = cleanText(
-    call?.summary ||
+    call?.aiSummary ||
+      call?.summary ||
+      call?.callSummary ||
       data?.aiSummary ||
       data?.summary ||
       data?.callSummary ||
@@ -192,19 +194,25 @@ export function extractPhoneFromWebhook(payload: any): string {
   if (direction === 'outbound') {
     return (
       data?.toNumber ||
+      data?.call?.toNumber ||
       data?.phoneNumber ||
+      data?.call?.phoneNumber ||
       data?.contact?.phone ||
       data?.phone ||
       data?.call?.phone ||
       data?.caller?.phone ||
       data?.customer?.phone ||
+      payload?.toNumber ||
+      payload?.phoneNumber ||
       ''
     );
   }
 
   return (
     data?.fromNumber ||
+    data?.call?.fromNumber ||
     data?.phoneNumber ||
+    data?.call?.phoneNumber ||
     data?.contact?.phone ||
     data?.phone ||
     data?.call?.phone ||
@@ -228,10 +236,10 @@ export function extractBusinessPhoneFromWebhook(payload: any): string {
   const direction = cleanText(data?.direction || data?.call?.direction || payload?.direction).toLowerCase();
 
   if (direction === 'outbound') {
-    return data?.fromNumber || data?.businessNumber || data?.agentNumber || data?.toNumber || '';
+    return data?.fromNumber || data?.call?.fromNumber || data?.businessNumber || data?.agentNumber || data?.toNumber || data?.call?.toNumber || '';
   }
 
-  return data?.toNumber || data?.businessNumber || data?.agentNumber || payload?.toNumber || '';
+  return data?.toNumber || data?.call?.toNumber || data?.businessNumber || data?.agentNumber || payload?.toNumber || '';
 }
 
 export function buildTelegramCallButton(payload: any) {
