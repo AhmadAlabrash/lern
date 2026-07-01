@@ -10,7 +10,7 @@ import { getCurrentSmsUsageMonth, getMonthlySmsUsage, getPlanSmsLimit, increment
 import { logDeliveryError } from '@/lib/monitoring';
 import { translateWebhookPayloadToGerman } from '@/lib/translate';
 import { createWebhookReceipt, markWebhookReceiptProcessed } from '@/lib/webhook-dedupe';
-import { getCallNotificationKind, getInboundHoldMs, markCallNotificationProcessed, reserveCallNotification, sleep } from '@/lib/call-notification-dedupe';
+import { getCallNotificationKind, getInboundHoldMs, markCallNotificationProcessed, reserveCallNotification, shouldStillSendReservedCallNotification, sleep } from '@/lib/call-notification-dedupe';
 
 /**
  * Public webhook endpoint.
@@ -137,12 +137,9 @@ export async function POST(request: Request) {
     };
 
     if (telegramCanAttempt || emailCanAttempt) {
-      const holdMs = getInboundHoldMs(settings, eventName, notificationKind);
-      if (holdMs > 0) {
-        await sleep(holdMs);
-        delivery.call_notification_hold_ms = String(holdMs);
-      }
-
+      // Reserve first, before the delay. This allows a later high-priority
+      // event for the same callId, such as human_escalation.requested, to
+      // upgrade this pending reservation and prevent a plain call notification.
       callNotificationReservation = await reserveCallNotification({
         userId: String(user.id),
         eventName,
@@ -150,10 +147,29 @@ export async function POST(request: Request) {
         kind: notificationKind,
       });
 
+      if (callNotificationReservation.shouldSend) {
+        const holdMs = getInboundHoldMs(settings, eventName, notificationKind);
+        if (holdMs > 0) {
+          await sleep(holdMs);
+          delivery.call_notification_hold_ms = String(holdMs);
+
+          const stillOwnsReservation = await shouldStillSendReservedCallNotification(
+            callNotificationReservation.notificationKey,
+            eventName,
+            notificationKind
+          );
+
+          if (!stillOwnsReservation) {
+            callNotificationReservation.shouldSend = false;
+            delivery.call_notification = 'suppressed_higher_priority_same_call';
+          }
+        }
+      }
+
       if (!callNotificationReservation.shouldSend) {
-        delivery.call_notification = `suppressed_same_call${callNotificationReservation.existingEvent ? `_already_${callNotificationReservation.existingEvent}` : ''}`;
+        delivery.call_notification = delivery.call_notification || `suppressed_same_call${callNotificationReservation.existingEvent ? `_already_${callNotificationReservation.existingEvent}` : ''}`;
       } else if (callNotificationReservation.dedupeEnabled) {
-        delivery.call_notification = 'reserved';
+        delivery.call_notification = callNotificationReservation.reason || 'reserved';
       }
     }
 

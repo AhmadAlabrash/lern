@@ -20,26 +20,19 @@ type ReserveResult = {
 };
 
 /**
- * Returns a notification kind used for template selection and cross-event
- * suppression.
+ * Template selection is EVENT-ONLY.
  *
- * IMPORTANT: This must be EVENT-ONLY.
- * We must not infer human escalation from transcript/summary text, because
- * inbound_call.completed can contain words like "agent", "human" or similar
- * inside normal summaries/transcripts. The sender already sends a dedicated
- * event: human_escalation.requested. Only that event should use the human
- * escalation template.
+ * inbound_call.completed      -> plain call template
+ * human_escalation.requested  -> human escalation template
+ * appointment.requested       -> appointment/SMS flow
+ *
+ * Do not infer human escalation from transcript or summary here.
  */
 export function getCallNotificationKind(eventName: string, payload: any): CallNotificationKind {
   const event = String(eventName || payload?.event || '').trim();
 
-  if (event === 'human_escalation.requested') {
-    return 'human_escalation';
-  }
-
-  if (event === 'appointment.requested' || event === 'appointment.needed') {
-    return 'appointment_requested';
-  }
+  if (event === 'human_escalation.requested') return 'human_escalation';
+  if (event === 'appointment.requested' || event === 'appointment.needed') return 'appointment_requested';
 
   if (
     event === 'inbound_call.completed' ||
@@ -65,12 +58,13 @@ export function getInboundHoldMs(settings: Record<string, string>, eventName: st
   if (eventName !== 'inbound_call.completed' && eventName !== 'outbound_call.completed') return 0;
   if (kind !== 'call_completed') return 0;
 
-  const raw = Number(settings['dedupe.call_completed_hold_ms'] || '3000');
+  const raw = Number(settings['dedupe.call_completed_hold_ms'] || '8000');
   if (!Number.isFinite(raw)) return 0;
 
-  // Keep this low so Vercel does not time out, but high enough to let the
-  // post-call appointment/human events arrive and reserve the notification.
-  return Math.max(0, Math.min(7000, Math.round(raw)));
+  // Keep the delay configurable. The default 8 seconds gives the post-call
+  // human_escalation.requested event time to arrive and replace the plain call
+  // notification before it is sent.
+  return Math.max(0, Math.min(15000, Math.round(raw)));
 }
 
 export async function sleep(ms: number) {
@@ -79,15 +73,23 @@ export async function sleep(ms: number) {
 }
 
 /**
- * Reserves the one Email/Telegram call notification for this real call.
+ * Reserve one Email/Telegram notification for one real call.
  *
- * This does not block SMS, because SMS follow-ups are action-specific and must
- * still run for appointment.requested even when an email was already sent.
+ * Important behavior:
+ * - A plain inbound_call.completed creates a pending reservation first, then waits.
+ * - If human_escalation.requested arrives during that wait with the same callId,
+ *   it upgrades the reservation and sends the human template.
+ * - When the plain call wakes up, it checks the reservation again. If it was
+ *   upgraded, it suppresses the plain call email/Telegram.
+ * - If a lower-priority or duplicate event arrives after a notification was
+ *   already processed, it is suppressed so the user never gets two emails for
+ *   the same callId.
+ *
+ * SMS is intentionally separate and not blocked by this call notification table.
  */
 export async function reserveCallNotification(input: ReserveInput): Promise<ReserveResult> {
   const groupId = extractCallGroupId(input.payload);
 
-  // Non-call/generic payloads continue normally.
   if (!groupId) {
     return { dedupeEnabled: false, shouldSend: true, reason: 'no_call_group' };
   }
@@ -123,6 +125,38 @@ export async function reserveCallNotification(input: ReserveInput): Promise<Rese
         .eq('notification_key', notificationKey)
         .maybeSingle();
 
+      const existingPriority = Number((existing as any)?.priority || 0);
+      const existingStatus = String((existing as any)?.status || '');
+      const existingEvent = String((existing as any)?.event || '');
+      const isStillPending = existingStatus === 'reserved';
+
+      // A higher-priority event can replace a pending lower-priority event.
+      // Example: human_escalation.requested replaces inbound_call.completed
+      // while the call-completed request is still waiting.
+      if (priority > existingPriority && isStillPending) {
+        await supabase
+          .from('webhook_notification_receipts')
+          .update({
+            event: input.eventName || 'unknown',
+            kind: input.kind,
+            priority,
+            status: 'reserved',
+            payload: input.payload || null,
+            received_count: ((existing as any)?.received_count || 1) + 1,
+            last_received_at: new Date().toISOString(),
+          })
+          .eq('notification_key', notificationKey);
+
+        return {
+          dedupeEnabled: true,
+          shouldSend: true,
+          notificationKey,
+          groupId,
+          reason: 'upgraded_pending_notification',
+          existingEvent,
+        };
+      }
+
       await supabase
         .from('webhook_notification_receipts')
         .update({
@@ -136,8 +170,8 @@ export async function reserveCallNotification(input: ReserveInput): Promise<Rese
         shouldSend: false,
         notificationKey,
         groupId,
-        reason: 'same_call_already_notified',
-        existingEvent: (existing as any)?.event || '',
+        reason: existingStatus === 'reserved' ? 'lower_or_same_priority_pending' : 'same_call_already_notified',
+        existingEvent,
       };
     }
 
@@ -146,6 +180,39 @@ export async function reserveCallNotification(input: ReserveInput): Promise<Rese
   } catch (error) {
     console.error('Call notification dedupe unavailable:', error);
     return { dedupeEnabled: false, shouldSend: true, notificationKey, groupId, reason: getErrorMessage(error) };
+  }
+}
+
+/**
+ * After a delayed plain call-completed event wakes up, confirm that it still
+ * owns the pending reservation. If a higher-priority event upgraded the row,
+ * this returns false and the plain call notification is suppressed.
+ */
+export async function shouldStillSendReservedCallNotification(
+  notificationKey: string | undefined,
+  eventName: string,
+  kind: CallNotificationKind
+) {
+  if (!notificationKey) return true;
+
+  try {
+    const supabase = createServiceSupabaseClient();
+    const { data, error } = await supabase
+      .from('webhook_notification_receipts')
+      .select('event,kind,status')
+      .eq('notification_key', notificationKey)
+      .maybeSingle();
+
+    if (error || !data) return true;
+
+    return (
+      String((data as any).event || '') === String(eventName || '') &&
+      String((data as any).kind || '') === String(kind || '') &&
+      String((data as any).status || '') === 'reserved'
+    );
+  } catch (error) {
+    console.error('Failed to verify call notification reservation:', error);
+    return true;
   }
 }
 
@@ -189,38 +256,6 @@ export function extractCallGroupId(payload: any): string {
   }
 
   return '';
-}
-
-
-function extractUserTranscriptText(transcript: any): string {
-  if (transcript === undefined || transcript === null) return '';
-
-  const raw = String(transcript);
-  const lines = raw.split(/\r?\n/);
-  const userLines = lines
-    .filter((line) => /^\s*(USER|CUSTOMER|CALLER|ANRUFER|KUNDE)\s*(\([^)]*\))?\s*:/i.test(line))
-    .map((line) => line.replace(/^\s*(USER|CUSTOMER|CALLER|ANRUFER|KUNDE)\s*(\([^)]*\))?\s*:\s*/i, '').trim())
-    .filter(Boolean);
-
-  // Only use caller/customer lines for intent detection. If no caller lines are
-  // present, return an empty string instead of scanning AGENT lines.
-  return userLines.join('\n');
-}
-
-function isHumanEscalationText(text: string): boolean {
-  const value = String(text || '').toLowerCase();
-  if (!value.trim()) return false;
-
-  return (
-    /\b(human|operator|representative|staff|receptionist)\b/.test(value) ||
-    /\b(real person|live person)\b/.test(value) ||
-    /\b(talk|speak|connect|transfer|reach)\b.{0,60}\b(someone|somebody|person|human|operator|representative|staff)\b/.test(value) ||
-    /\b(mensch|mitarbeiter|mitarbeiterin|kundenberater|supportmitarbeiter|rezeptionist)\b/.test(value) ||
-    value.includes('mit einem menschen') ||
-    value.includes('mitarbeiter sprechen') ||
-    value.includes('jemanden sprechen') ||
-    value.includes('mit einer person sprechen')
-  );
 }
 
 function sha256(value: string) {
