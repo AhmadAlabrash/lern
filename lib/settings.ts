@@ -103,6 +103,9 @@ Zeitpunkt: {timestamp}
 📝 Anliegen:
 {summary}
 
+🤖 KI Einschätzung:
+{human_support_reason}
+
 💬 Gesprächsauszug:
 {transcript}
 
@@ -134,6 +137,9 @@ Zeitpunkt: {timestamp}
 
 📝 Anliegen:
 {summary}
+
+🤖 KI Einschätzung:
+{human_support_reason}
 
 💬 Gesprächsauszug:
 {transcript}
@@ -203,6 +209,9 @@ KI-Rezeption`,
   // Environment variables still work as fallback.
   'openai.api_key': '',
   'openai.translation_model': 'gpt-4o-mini',
+  'openai.analysis_model': '',
+  'ai.human_support_detection_enabled': 'true',
+  'ai.human_support_confidence_threshold': '0.6',
   'deepl.api_key': '',
   'deepl.api_url': '',
 

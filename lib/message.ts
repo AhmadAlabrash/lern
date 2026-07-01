@@ -107,6 +107,7 @@ export function buildWebhookTemplateValues(payload: any): Record<string, string>
   const agent = data?.agent || {};
   const humanEscalation = data?.humanEscalation || data?.human_escalation || {};
   const appointmentRequest = data?.appointmentRequest || data?.appointment_request || {};
+  const aiHumanSupport = data?.aiHumanSupport || data?.ai_human_support || call?.aiHumanSupport || {};
 
   const event = cleanText(payload?.event);
   const direction = cleanText(data?.direction || call?.direction || payload?.direction);
@@ -183,6 +184,11 @@ export function buildWebhookTemplateValues(payload: any): Record<string, string>
 
     classification: cleanText(call?.classification || data?.classification),
     sentiment: cleanText(call?.sentiment || data?.sentiment),
+
+    human_support_needed: aiHumanSupport?.needed === true ? 'Ja' : aiHumanSupport?.needed === false ? 'Nein' : '',
+    human_support_reason: cleanText(aiHumanSupport?.reason),
+    human_support_confidence:
+      aiHumanSupport?.confidence !== undefined && aiHumanSupport?.confidence !== null ? String(aiHumanSupport.confidence) : '',
   };
 }
 
@@ -192,7 +198,7 @@ function cleanupRenderedTemplate(text: string) {
     .map((line) => line.trimEnd())
     .filter((line) => {
       // Remove common placeholder-only lines after their value was empty.
-      return !line.match(/^\s*(Name|Telefon|E-Mail|Firma|Adresse|Event|Richtung|Status|Dauer|Klassifizierung|Stimmung|Aufnahme|Call ID|Conversation ID|Call SID|Agent ID|Transkript|Zusammenfassung|Anrufer|Angerufene Nummer|Rückruf|Anliegen|Gesprächsauszug|Agent):\s*$/i);
+      return !line.match(/^\s*(Name|Telefon|E-Mail|Firma|Adresse|Event|Richtung|Status|Dauer|Klassifizierung|Stimmung|Aufnahme|Call ID|Conversation ID|Call SID|Agent ID|Transkript|Zusammenfassung|Anrufer|Angerufene Nummer|Rückruf|Anliegen|Gesprächsauszug|Agent|Human Support|KI Einschätzung|Grund):\s*$/i);
     })
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')

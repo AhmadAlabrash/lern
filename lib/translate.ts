@@ -22,7 +22,9 @@ const SUMMARY_FIELD_PATHS: FieldPath[] = [
   ['data', 'aiSummary'],
   ['data', 'summary'],
   ['data', 'callSummary'],
+  ['data', 'call', 'aiSummary'],
   ['data', 'call', 'summary'],
+  ['data', 'call', 'callSummary'],
 ];
 
 const TRANSCRIPT_FIELD_PATHS: FieldPath[] = [

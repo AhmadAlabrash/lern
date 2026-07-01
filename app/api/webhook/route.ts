@@ -9,6 +9,7 @@ import { getEventName, shouldDeliverForEvent } from '@/lib/events';
 import { getCurrentSmsUsageMonth, getMonthlySmsUsage, getPlanSmsLimit, incrementMonthlySmsUsage } from '@/lib/plans';
 import { logDeliveryError } from '@/lib/monitoring';
 import { translateWebhookPayloadToGerman } from '@/lib/translate';
+import { analyzeCompletedCallWithOpenAI } from '@/lib/call-ai';
 import { createWebhookReceipt, markWebhookReceiptProcessed } from '@/lib/webhook-dedupe';
 import { getCallNotificationKind, getInboundHoldMs, markCallNotificationProcessed, reserveCallNotification, shouldStillSendReservedCallNotification, sleep } from '@/lib/call-notification-dedupe';
 
@@ -97,24 +98,19 @@ export async function POST(request: Request) {
       'translation.target_lang',
       'openai.api_key',
       'openai.translation_model',
+      'openai.analysis_model',
+      'ai.human_support_detection_enabled',
+      'ai.human_support_confidence_threshold',
       'deepl.api_key',
       'deepl.api_url',
       'dedupe.call_completed_hold_ms',
     ]);
 
-    const notificationKind = getCallNotificationKind(eventName, payload);
-    const notificationPayload = await translateWebhookPayloadToGerman(payload, settings);
-    const phone = extractPhoneFromWebhook(notificationPayload);
-    const callButton = buildTelegramCallButton(notificationPayload);
-
-    const telegramTemplate = selectNotificationTemplate(settings, 'telegram', notificationKind);
-    const emailTemplate = selectNotificationTemplate(settings, 'email', notificationKind);
-    const telegramMessage = renderWebhookTemplate(notificationPayload, telegramTemplate);
-    const emailMessage = renderWebhookTemplate(notificationPayload, emailTemplate);
+    const baseNotificationKind = getCallNotificationKind(eventName, payload);
 
     const delivery: Record<string, string> = {
       event: eventName || 'unknown',
-      kind: notificationKind,
+      kind: baseNotificationKind,
       telegram: 'skipped',
       email: 'skipped',
       sms: 'skipped',
@@ -143,12 +139,12 @@ export async function POST(request: Request) {
       callNotificationReservation = await reserveCallNotification({
         userId: String(user.id),
         eventName,
-        payload: notificationPayload,
-        kind: notificationKind,
+        payload: payload,
+        kind: baseNotificationKind,
       });
 
       if (callNotificationReservation.shouldSend) {
-        const holdMs = getInboundHoldMs(settings, eventName, notificationKind);
+        const holdMs = getInboundHoldMs(settings, eventName, baseNotificationKind);
         if (holdMs > 0) {
           await sleep(holdMs);
           delivery.call_notification_hold_ms = String(holdMs);
@@ -156,7 +152,7 @@ export async function POST(request: Request) {
           const stillOwnsReservation = await shouldStillSendReservedCallNotification(
             callNotificationReservation.notificationKey,
             eventName,
-            notificationKind
+            baseNotificationKind
           );
 
           if (!stillOwnsReservation) {
@@ -172,6 +168,51 @@ export async function POST(request: Request) {
         delivery.call_notification = callNotificationReservation.reason || 'reserved';
       }
     }
+
+    let notificationKind = baseNotificationKind;
+    let notificationPayload = payload;
+
+    if (callNotificationReservation.shouldSend) {
+      const smartAnalysis = await analyzeCompletedCallWithOpenAI(payload, settings, eventName, baseNotificationKind);
+
+      if (smartAnalysis.used) {
+        notificationPayload = smartAnalysis.payload;
+        delivery.ai_human_support = smartAnalysis.needsHumanSupport ? 'yes' : 'no';
+        delivery.ai_human_support_confidence = smartAnalysis.confidence !== undefined ? String(smartAnalysis.confidence) : '';
+        if (smartAnalysis.reasonDe) delivery.ai_human_support_reason = smartAnalysis.reasonDe;
+
+        if (smartAnalysis.needsHumanSupport) {
+          notificationKind = 'human_escalation';
+          delivery.kind = notificationKind;
+        }
+
+        if ((settings['translation.translate_transcript'] || 'false') === 'true') {
+          // The smart OpenAI call already translated the summary. If the admin
+          // also wants the transcript translated, translate only the transcript
+          // here to avoid paying to translate the summary twice.
+          notificationPayload = await translateWebhookPayloadToGerman(notificationPayload, {
+            ...settings,
+            'translation.translate_ai_summary': 'false',
+          });
+        }
+      } else {
+        if (smartAnalysis.error) delivery.ai_human_support = `not_used_${smartAnalysis.error}`.slice(0, 180);
+        notificationPayload = await translateWebhookPayloadToGerman(payload, settings);
+      }
+    } else {
+      // The Email/Telegram notification is suppressed for this call, so avoid
+      // paid translation/AI calls. SMS routing below can still use the original
+      // payload if the event is SMS-enabled.
+      notificationPayload = payload;
+    }
+
+    const phone = extractPhoneFromWebhook(notificationPayload);
+    const callButton = buildTelegramCallButton(notificationPayload);
+
+    const telegramTemplate = selectNotificationTemplate(settings, 'telegram', notificationKind);
+    const emailTemplate = selectNotificationTemplate(settings, 'email', notificationKind);
+    const telegramMessage = renderWebhookTemplate(notificationPayload, telegramTemplate);
+    const emailMessage = renderWebhookTemplate(notificationPayload, emailTemplate);
 
     if (user.notify_telegram !== false) {
       if (!shouldDeliverForEvent(settings['routing.telegram_events'], eventName)) {

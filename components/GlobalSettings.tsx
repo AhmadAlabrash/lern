@@ -132,6 +132,9 @@ const placeholders = [
   '{appointment_requested_at}',
   '{classification}',
   '{sentiment}',
+  '{human_support_needed}',
+  '{human_support_reason}',
+  '{human_support_confidence}',
   '{booking_url}',
   '{whatsapp_link}',
   '{whatsapp_number}',
@@ -375,6 +378,12 @@ export default function GlobalSettings() {
                     checked={(settings['translation.translate_transcript'] || 'false') === 'true'}
                     onChange={(checked) => updateBoolean('translation.translate_transcript', checked)}
                   />
+                  <CheckboxCard
+                    title="Smart human support detection"
+                    description="When provider is OpenAI, completed calls can be translated and checked in one request. If the caller still needs a person, the human template is used."
+                    checked={(settings['ai.human_support_detection_enabled'] || 'true') === 'true'}
+                    onChange={(checked) => updateBoolean('ai.human_support_detection_enabled', checked)}
+                  />
                 </div>
 
                 <label className="mt-5 block">
@@ -410,6 +419,28 @@ export default function GlobalSettings() {
                       className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
                     />
                   </label>
+                  <label className="block">
+                    <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Analysis model optional</span>
+                    <input
+                      value={settings['openai.analysis_model'] || ''}
+                      onChange={(event) => update('openai.analysis_model', event.target.value)}
+                      placeholder="Leave empty to use translation model"
+                      className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Human support confidence threshold</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={settings['ai.human_support_confidence_threshold'] || '0.6'}
+                      onChange={(event) => update('ai.human_support_confidence_threshold', event.target.value)}
+                      placeholder="0.6"
+                      className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                    />
+                  </label>
                 </div>
               </Card>
 
@@ -441,9 +472,9 @@ export default function GlobalSettings() {
               <Card>
                 <Label title="Recommended setup" description="For your current call notifications." />
                 <div className="mt-4 space-y-3 text-sm leading-6 text-slate-600">
-                  <p><strong>Provider:</strong> OpenAI for lowest cost, or DeepL for very clean German translation.</p>
+                  <p><strong>Provider:</strong> OpenAI is recommended when you want translation + smart human-support detection in one request. DeepL is translation only.</p>
                   <p><strong>AI summary:</strong> On, because your call system can generate this field in English.</p>
-                  <p><strong>Transcript:</strong> Off, because most real callers and your agent should already speak German. Turning it on costs more and can slightly change what was said.</p>
+                  <p><strong>Transcript:</strong> Off, because most real callers and your agent should already speak German. The smart detection still reads caller lines for the decision without translating the full transcript.</p>
                 </div>
               </Card>
             </div>
