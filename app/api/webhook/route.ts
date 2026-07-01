@@ -8,6 +8,7 @@ import { getSettingsMap } from '@/lib/settings';
 import { getEventName, shouldDeliverForEvent } from '@/lib/events';
 import { getCurrentSmsUsageMonth, getMonthlySmsUsage, getPlanSmsLimit, incrementMonthlySmsUsage } from '@/lib/plans';
 import { logDeliveryError } from '@/lib/monitoring';
+import { translateWebhookPayloadToGerman } from '@/lib/translate';
 
 /**
  * Public webhook endpoint.
@@ -62,14 +63,23 @@ export async function POST(request: Request) {
       'template.telegram',
       'template.email',
       'template.sms',
+      'translation.provider',
+      'translation.translate_ai_summary',
+      'translation.translate_transcript',
+      'translation.target_lang',
+      'openai.api_key',
+      'openai.translation_model',
+      'deepl.api_key',
+      'deepl.api_url',
     ]);
 
     const eventName = getEventName(payload);
+    const notificationPayload = await translateWebhookPayloadToGerman(payload, settings);
     const phone = extractPhoneFromWebhook(payload);
     const callButton = buildTelegramCallButton(payload);
 
-    const telegramMessage = renderWebhookTemplate(payload, settings['template.telegram']);
-    const emailMessage = renderWebhookTemplate(payload, settings['template.email']);
+    const telegramMessage = renderWebhookTemplate(notificationPayload, settings['template.telegram']);
+    const emailMessage = renderWebhookTemplate(notificationPayload, settings['template.email']);
 
     const delivery = {
       event: eventName || 'unknown',
@@ -159,7 +169,7 @@ export async function POST(request: Request) {
                 template: settings['template.sms'],
                 bookingUrl: user.booking_url,
                 whatsappNumber: user.whatsapp_number,
-                contactName: extractContactNameFromWebhook(payload),
+                contactName: extractContactNameFromWebhook(notificationPayload),
                 contactPhone: phone,
                 eventName,
               });

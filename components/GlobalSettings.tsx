@@ -3,8 +3,9 @@
 import { ReactNode, useEffect, useMemo, useState } from 'react';
 
 type SettingsMap = Record<string, string>;
-
-type Section = 'routing' | 'templates' | 'plans' | 'credentials';
+type Section = 'routing' | 'templates' | 'translation' | 'plans' | 'credentials';
+type InputKind = 'text' | 'password' | 'number' | 'email';
+type CredentialField = [key: string, label: string, placeholder: string, type: InputKind];
 
 const routingFields = [
   {
@@ -50,7 +51,11 @@ const templateFields = [
   },
 ];
 
-const credentialGroups = [
+const credentialGroups: Array<{
+  title: string;
+  description: string;
+  fields: CredentialField[];
+}> = [
   {
     title: 'SMTP',
     description: 'Used for secret emails and webhook email notifications.',
@@ -153,6 +158,10 @@ export default function GlobalSettings() {
     setSettings((previous) => ({ ...previous, [key]: value }));
   };
 
+  const updateBoolean = (key: string, checked: boolean) => {
+    update(key, checked ? 'true' : 'false');
+  };
+
   const save = async () => {
     setSaving(true);
     setNotice(null);
@@ -188,6 +197,8 @@ export default function GlobalSettings() {
     };
   }, [settings]);
 
+  const provider = settings['translation.provider'] || 'off';
+
   return (
     <div className="space-y-6">
       <div className="rounded-[2rem] border border-slate-800 bg-slate-950 p-6 text-white shadow-2xl shadow-slate-950/20">
@@ -196,7 +207,7 @@ export default function GlobalSettings() {
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-violet-300">Global control</p>
             <h2 className="mt-2 text-3xl font-black tracking-tight">Routing, templates & API settings</h2>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
-              These settings are centralized. Change them once here and all webhook users follow the same event routing and message templates.
+              These settings are centralized. Change them once here and all webhook users follow the same event routing, templates and translation rules.
             </p>
           </div>
 
@@ -209,19 +220,21 @@ export default function GlobalSettings() {
           </button>
         </div>
 
-        <div className="mt-6 grid gap-3 sm:grid-cols-3">
+        <div className="mt-6 grid gap-3 sm:grid-cols-4">
           <MiniStat label="Telegram route events" value={eventsCount.telegram} />
           <MiniStat label="Email route events" value={eventsCount.email} />
           <MiniStat label="SMS route events" value={eventsCount.sms} />
+          <TextStat label="Translation provider" value={provider === 'off' ? 'Off' : provider.toUpperCase()} />
         </div>
       </div>
 
       {notice && <Alert type={notice.type}>{notice.text}</Alert>}
 
       <div className="rounded-[2rem] border border-slate-200 bg-white p-3 shadow-sm">
-        <div className="grid gap-2 md:grid-cols-4">
+        <div className="grid gap-2 md:grid-cols-5">
           <SectionButton active={activeSection === 'routing'} onClick={() => setActiveSection('routing')} title="Event Routing" description="Which events trigger each channel" />
           <SectionButton active={activeSection === 'templates'} onClick={() => setActiveSection('templates')} title="Messages" description="Telegram, email and SMS content" />
+          <SectionButton active={activeSection === 'translation'} onClick={() => setActiveSection('translation')} title="Translation" description="OpenAI or DeepL German output" />
           <SectionButton active={activeSection === 'plans'} onClick={() => setActiveSection('plans')} title="Plans" description="Monthly SMS limits" />
           <SectionButton active={activeSection === 'credentials'} onClick={() => setActiveSection('credentials')} title="API Credentials" description="SMTP, Telegram and Twilio" />
         </div>
@@ -291,6 +304,110 @@ export default function GlobalSettings() {
                       {placeholder}
                     </button>
                   ))}
+                </div>
+              </Card>
+            </div>
+          )}
+
+          {activeSection === 'translation' && (
+            <div className="grid gap-5 xl:grid-cols-[1fr,1fr]">
+              <Card>
+                <Label
+                  title="Translation provider"
+                  description="Choose which service translates notification text before the email and Telegram templates are rendered. Use Off to send the original payload text."
+                />
+                <select
+                  value={provider}
+                  onChange={(event) => update('translation.provider', event.target.value)}
+                  className="mt-4 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold text-slate-900 outline-none transition focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                >
+                  <option value="off">Off - no translation</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="deepl">DeepL</option>
+                </select>
+
+                <div className="mt-5 grid gap-4 md:grid-cols-2">
+                  <CheckboxCard
+                    title="Translate AI summary"
+                    description="Recommended. This fixes English aiSummary fields from the call system."
+                    checked={(settings['translation.translate_ai_summary'] || 'true') === 'true'}
+                    onChange={(checked) => updateBoolean('translation.translate_ai_summary', checked)}
+                  />
+                  <CheckboxCard
+                    title="Translate transcript"
+                    description="Usually off. Turn on only when transcript arrives in English."
+                    checked={(settings['translation.translate_transcript'] || 'false') === 'true'}
+                    onChange={(checked) => updateBoolean('translation.translate_transcript', checked)}
+                  />
+                </div>
+
+                <label className="mt-5 block">
+                  <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Target language</span>
+                  <input
+                    value={settings['translation.target_lang'] || 'DE'}
+                    onChange={(event) => update('translation.target_lang', event.target.value)}
+                    placeholder="DE"
+                    className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                  />
+                </label>
+              </Card>
+
+              <Card>
+                <Label title="OpenAI settings" description="Used when Translation provider is OpenAI. The key is stored in app_settings like your Twilio credentials." />
+                <div className="mt-4 space-y-4">
+                  <label className="block">
+                    <span className="text-xs font-bold uppercase tracking-wide text-slate-500">OpenAI API key</span>
+                    <input
+                      type="password"
+                      value={settings['openai.api_key'] || ''}
+                      onChange={(event) => update('openai.api_key', event.target.value)}
+                      placeholder="sk-..."
+                      className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Translation model</span>
+                    <input
+                      value={settings['openai.translation_model'] || 'gpt-4o-mini'}
+                      onChange={(event) => update('openai.translation_model', event.target.value)}
+                      placeholder="gpt-4o-mini"
+                      className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                    />
+                  </label>
+                </div>
+              </Card>
+
+              <Card>
+                <Label title="DeepL settings" description="Used when Translation provider is DeepL. Leave API URL empty and the app detects Free vs Pro from the API key." />
+                <div className="mt-4 space-y-4">
+                  <label className="block">
+                    <span className="text-xs font-bold uppercase tracking-wide text-slate-500">DeepL API key</span>
+                    <input
+                      type="password"
+                      value={settings['deepl.api_key'] || ''}
+                      onChange={(event) => update('deepl.api_key', event.target.value)}
+                      placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx"
+                      className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-bold uppercase tracking-wide text-slate-500">DeepL API URL optional</span>
+                    <input
+                      value={settings['deepl.api_url'] || ''}
+                      onChange={(event) => update('deepl.api_url', event.target.value)}
+                      placeholder="https://api-free.deepl.com/v2/translate or https://api.deepl.com/v2/translate"
+                      className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                    />
+                  </label>
+                </div>
+              </Card>
+
+              <Card>
+                <Label title="Recommended setup" description="For your current call notifications." />
+                <div className="mt-4 space-y-3 text-sm leading-6 text-slate-600">
+                  <p><strong>Provider:</strong> OpenAI for lowest cost, or DeepL for very clean German translation.</p>
+                  <p><strong>AI summary:</strong> On, because your call system can generate this field in English.</p>
+                  <p><strong>Transcript:</strong> Off, because most real callers and your agent should already speak German. Turning it on costs more and can slightly change what was said.</p>
                 </div>
               </Card>
             </div>
@@ -379,6 +496,33 @@ function PlanLimitCard({
   );
 }
 
+function CheckboxCard({
+  title,
+  description,
+  checked,
+  onChange,
+}: {
+  title: string;
+  description: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex cursor-pointer gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 transition hover:border-violet-200 hover:bg-violet-50">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="mt-1 h-5 w-5 rounded border-slate-300 text-violet-600 focus:ring-violet-500"
+      />
+      <span>
+        <span className="block text-sm font-black text-slate-950">{title}</span>
+        <span className="mt-1 block text-xs leading-5 text-slate-500">{description}</span>
+      </span>
+    </label>
+  );
+}
+
 function SectionButton({ active, onClick, title, description }: { active: boolean; onClick: () => void; title: string; description: string }) {
   return (
     <button
@@ -396,6 +540,15 @@ function SectionButton({ active, onClick, title, description }: { active: boolea
 }
 
 function MiniStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-3xl border border-white/10 bg-white/5 p-4">
+      <div className="text-2xl font-black">{value}</div>
+      <div className="mt-1 text-xs text-slate-300">{label}</div>
+    </div>
+  );
+}
+
+function TextStat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-3xl border border-white/10 bg-white/5 p-4">
       <div className="text-2xl font-black">{value}</div>

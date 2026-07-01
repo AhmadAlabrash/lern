@@ -124,6 +124,20 @@ KI-Rezeption`,
   'twilio.messaging_service_sid': '',
   'sms.default_provider': 'twilio',
 
+  // Translation settings for webhook notification text.
+  // provider: off | openai | deepl
+  'translation.provider': 'off',
+  'translation.translate_ai_summary': 'true',
+  'translation.translate_transcript': 'false',
+  'translation.target_lang': 'DE',
+
+  // Translation credentials can be managed from the admin dashboard.
+  // Environment variables still work as fallback.
+  'openai.api_key': '',
+  'openai.translation_model': 'gpt-4o-mini',
+  'deepl.api_key': '',
+  'deepl.api_url': '',
+
   'plan.free_sms_limit': '0',
   'plan.pro_sms_limit': '200',
   'plan.ultimate_sms_limit': '500',

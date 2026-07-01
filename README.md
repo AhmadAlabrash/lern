@@ -258,3 +258,54 @@ For existing deployments, run `supabase-call-webhook-fix.sql` once in Supabase a
 3. Run `supabase.sql` in Supabase.
 4. Configure global settings from the admin dashboard.
 5. Set Telegram webhook if Telegram `/start` is needed.
+
+## Optional: Translate call notifications to German
+
+If the call provider sends `aiSummary` or `transcript` in English, enable the built-in translation layer.
+
+In Vercel → Project → Settings → Environment Variables, add:
+
+```env
+TRANSLATE_NOTIFICATIONS_TO_DE=true
+```
+
+Then add one translation provider.
+
+Option A — DeepL:
+
+```env
+DEEPL_API_KEY=your_deepl_api_key
+# Optional. Only set this if you want to force a specific endpoint:
+# DEEPL_API_URL=https://api-free.deepl.com/v2/translate
+# DEEPL_API_URL=https://api.deepl.com/v2/translate
+```
+
+Option B — OpenAI:
+
+```env
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_TRANSLATION_MODEL=gpt-4o-mini
+```
+
+The app translates only human-readable fields like `data.aiSummary`, `data.summary`, `data.transcript`, and `message`. If translation fails or no key is configured, webhook delivery continues with the original text.
+
+## Admin-controlled translation
+
+The admin dashboard now has a **Translation** tab.
+
+Recommended setup for call notifications:
+
+- `Translation provider`: `OpenAI` or `DeepL`
+- `Translate AI summary`: enabled
+- `Translate transcript`: disabled unless transcripts arrive in English
+- Add the matching API key in the same Translation tab
+
+The webhook code reads these settings from `app_settings`. Environment variables still work as a fallback, but they are no longer required for translation.
+
+For existing Supabase projects, run:
+
+```sql
+-- file: supabase-translation-settings.sql
+```
+
+Then open Admin Dashboard → Translation, choose provider, add API key, and save.

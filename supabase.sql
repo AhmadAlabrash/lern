@@ -82,6 +82,14 @@ Bitte behandeln Sie diesen Token vertraulich und geben Sie ihn nicht öffentlich
 Freundliche Grüße
 KI-Rezeption'),
   ('sms.default_provider', 'twilio'),
+  ('translation.provider', 'off'),
+  ('translation.translate_ai_summary', 'true'),
+  ('translation.translate_transcript', 'false'),
+  ('translation.target_lang', 'DE'),
+  ('openai.api_key', ''),
+  ('openai.translation_model', 'gpt-4o-mini'),
+  ('deepl.api_key', ''),
+  ('deepl.api_url', ''),
   ('plan.free_sms_limit', '0'),
   ('plan.pro_sms_limit', '200'),
   ('plan.ultimate_sms_limit', '500'),
@@ -246,3 +254,19 @@ $template$, now())
 on conflict (key) do update set
   value = excluded.value,
   updated_at = now();
+
+
+-- ---------------------------------------------------------------------------
+-- 2026-07-01 translation settings: choose OpenAI/DeepL from Admin Dashboard
+-- and choose whether to translate only AI summary or also transcript.
+-- ---------------------------------------------------------------------------
+insert into public.app_settings (key, value, updated_at) values
+  ('translation.provider', 'off', now()),
+  ('translation.translate_ai_summary', 'true', now()),
+  ('translation.translate_transcript', 'false', now()),
+  ('translation.target_lang', 'DE', now()),
+  ('openai.api_key', '', now()),
+  ('openai.translation_model', 'gpt-4o-mini', now()),
+  ('deepl.api_key', '', now()),
+  ('deepl.api_url', '', now())
+on conflict (key) do nothing;

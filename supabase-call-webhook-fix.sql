@@ -104,3 +104,16 @@ $template$, now())
 on conflict (key) do update set
   value = excluded.value,
   updated_at = now();
+
+-- Optional translation settings controlled from Admin Dashboard.
+-- Provider can be: off, openai, deepl.
+insert into public.app_settings (key, value, updated_at) values
+  ('translation.provider', 'off', now()),
+  ('translation.translate_ai_summary', 'true', now()),
+  ('translation.translate_transcript', 'false', now()),
+  ('translation.target_lang', 'DE', now()),
+  ('openai.api_key', '', now()),
+  ('openai.translation_model', 'gpt-4o-mini', now()),
+  ('deepl.api_key', '', now()),
+  ('deepl.api_url', '', now())
+on conflict (key) do nothing;
