@@ -21,55 +21,33 @@ type ReserveResult = {
 
 /**
  * Returns a notification kind used for template selection and cross-event
- * suppression. This is intentionally based on both the event name and the
- * real call text, because inbound_call.completed can arrive before the more
- * specific human_escalation.requested event.
+ * suppression.
+ *
+ * IMPORTANT: This must be EVENT-ONLY.
+ * We must not infer human escalation from transcript/summary text, because
+ * inbound_call.completed can contain words like "agent", "human" or similar
+ * inside normal summaries/transcripts. The sender already sends a dedicated
+ * event: human_escalation.requested. Only that event should use the human
+ * escalation template.
  */
 export function getCallNotificationKind(eventName: string, payload: any): CallNotificationKind {
   const event = String(eventName || payload?.event || '').trim();
-  const data = payload?.data || {};
-  const humanEscalation = data?.humanEscalation || data?.human_escalation || {};
-  const appointmentRequest = data?.appointmentRequest || data?.appointment_request || {};
 
-  if (event === 'human_escalation.requested' || humanEscalation?.status || humanEscalation?.intent) {
+  if (event === 'human_escalation.requested') {
     return 'human_escalation';
   }
 
-  if (event === 'appointment.requested' || event === 'appointment.needed' || appointmentRequest?.status || appointmentRequest?.intent) {
+  if (event === 'appointment.requested' || event === 'appointment.needed') {
     return 'appointment_requested';
   }
 
-  const text = [
-    humanEscalation?.intent,
-    appointmentRequest?.intent,
-    data?.intent,
-    data?.call?.aiSummary,
-    data?.call?.summary,
-    data?.call?.transcript,
-    data?.aiSummary,
-    data?.summary,
-    data?.transcript,
-  ]
-    .filter(Boolean)
-    .join('\n')
-    .toLowerCase();
-
-  // German + English phrases that strongly indicate the caller wants a human.
   if (
-    /\b(human|person|real person|agent|operator|staff|representative)\b/.test(text) ||
-    /\b(mensch|mitarbeiter|mitarbeiterin|person|kundenberater|berater|supportmitarbeiter|rezeptionist)\b/.test(text) ||
-    text.includes('speak with someone') ||
-    text.includes('talk to someone') ||
-    text.includes('talk to a human') ||
-    text.includes('speak to a human') ||
-    text.includes('mit einem menschen') ||
-    text.includes('mitarbeiter sprechen') ||
-    text.includes('jemanden sprechen')
+    event === 'inbound_call.completed' ||
+    event === 'outbound_call.completed' ||
+    event === 'inbound_call.failed' ||
+    event === 'inbound_call.missed' ||
+    event === 'outbound_call.failed'
   ) {
-    return 'human_escalation';
-  }
-
-  if (event === 'inbound_call.completed' || event === 'outbound_call.completed') {
     return 'call_completed';
   }
 
@@ -211,6 +189,38 @@ export function extractCallGroupId(payload: any): string {
   }
 
   return '';
+}
+
+
+function extractUserTranscriptText(transcript: any): string {
+  if (transcript === undefined || transcript === null) return '';
+
+  const raw = String(transcript);
+  const lines = raw.split(/\r?\n/);
+  const userLines = lines
+    .filter((line) => /^\s*(USER|CUSTOMER|CALLER|ANRUFER|KUNDE)\s*(\([^)]*\))?\s*:/i.test(line))
+    .map((line) => line.replace(/^\s*(USER|CUSTOMER|CALLER|ANRUFER|KUNDE)\s*(\([^)]*\))?\s*:\s*/i, '').trim())
+    .filter(Boolean);
+
+  // Only use caller/customer lines for intent detection. If no caller lines are
+  // present, return an empty string instead of scanning AGENT lines.
+  return userLines.join('\n');
+}
+
+function isHumanEscalationText(text: string): boolean {
+  const value = String(text || '').toLowerCase();
+  if (!value.trim()) return false;
+
+  return (
+    /\b(human|operator|representative|staff|receptionist)\b/.test(value) ||
+    /\b(real person|live person)\b/.test(value) ||
+    /\b(talk|speak|connect|transfer|reach)\b.{0,60}\b(someone|somebody|person|human|operator|representative|staff)\b/.test(value) ||
+    /\b(mensch|mitarbeiter|mitarbeiterin|kundenberater|supportmitarbeiter|rezeptionist)\b/.test(value) ||
+    value.includes('mit einem menschen') ||
+    value.includes('mitarbeiter sprechen') ||
+    value.includes('jemanden sprechen') ||
+    value.includes('mit einer person sprechen')
+  );
 }
 
 function sha256(value: string) {
