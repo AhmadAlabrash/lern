@@ -1,9 +1,9 @@
 import { createServiceSupabaseClient } from './supabase';
 
 export const SETTINGS_DEFAULTS: Record<string, string> = {
-  'routing.telegram_events': 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
-  'routing.email_events': 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
-  'routing.sms_events': 'appointment.needed',
+  'routing.telegram_events': 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.requested\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
+  'routing.email_events': 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.requested\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
+  'routing.sms_events': 'appointment.needed\nappointment.requested',
 
   'template.telegram': `📞 Neuer Anruf eingegangen
 

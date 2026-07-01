@@ -9,7 +9,7 @@
  * back to the original payload.
  */
 
-const TRANSLATION_TIMEOUT_MS = 12000;
+const TRANSLATION_TIMEOUT_MS = 5000;
 
 type SettingsMap = Record<string, string | undefined>;
 type TranslationProvider = 'deepl' | 'openai';

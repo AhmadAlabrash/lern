@@ -9,15 +9,23 @@ import { getEventName, shouldDeliverForEvent } from '@/lib/events';
 import { getCurrentSmsUsageMonth, getMonthlySmsUsage, getPlanSmsLimit, incrementMonthlySmsUsage } from '@/lib/plans';
 import { logDeliveryError } from '@/lib/monitoring';
 import { translateWebhookPayloadToGerman } from '@/lib/translate';
+import { createWebhookReceipt, markWebhookReceiptProcessed } from '@/lib/webhook-dedupe';
 
 /**
  * Public webhook endpoint.
  *
- * It authenticates requests with the user's Bearer secret, then uses global
- * admin-configured routing rules to decide which channels should run for the
- * incoming event name.
+ * Important behavior:
+ * - Auth / invalid JSON still return errors.
+ * - After a valid event is accepted, delivery-channel failures are logged but
+ *   the endpoint still returns 200. This prevents the upstream webhook sender
+ *   from retrying and creating duplicate emails/Telegram/SMS notifications.
+ * - Idempotency is handled by webhook_event_receipts, so the same callId /
+ *   conversationId / callSid is only notified once even if the sender retries.
  */
 export async function POST(request: Request) {
+  let receipt: Awaited<ReturnType<typeof createWebhookReceipt>> | null = null;
+  let eventName = 'unknown';
+
   try {
     const authHeader = request.headers.get('authorization') || request.headers.get('Authorization');
 
@@ -56,6 +64,23 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'Invalid bearer token' }, { status: 401 });
     }
 
+    eventName = getEventName(payload);
+
+    receipt = await createWebhookReceipt({
+      userId: String(user.id),
+      eventName,
+      payload,
+    });
+
+    if (receipt.dedupeEnabled && !receipt.firstDelivery) {
+      return NextResponse.json({
+        success: true,
+        duplicate: true,
+        message: 'Duplicate webhook retry ignored',
+        event: eventName,
+      });
+    }
+
     const settings = await getSettingsMap([
       'routing.telegram_events',
       'routing.email_events',
@@ -73,15 +98,14 @@ export async function POST(request: Request) {
       'deepl.api_url',
     ]);
 
-    const eventName = getEventName(payload);
     const notificationPayload = await translateWebhookPayloadToGerman(payload, settings);
-    const phone = extractPhoneFromWebhook(payload);
-    const callButton = buildTelegramCallButton(payload);
+    const phone = extractPhoneFromWebhook(notificationPayload);
+    const callButton = buildTelegramCallButton(notificationPayload);
 
     const telegramMessage = renderWebhookTemplate(notificationPayload, settings['template.telegram']);
     const emailMessage = renderWebhookTemplate(notificationPayload, settings['template.email']);
 
-    const delivery = {
+    const delivery: Record<string, string> = {
       event: eventName || 'unknown',
       telegram: 'skipped',
       email: 'skipped',
@@ -103,20 +127,14 @@ export async function POST(request: Request) {
               await sendTelegramMessage(user.telegram_chat_id, telegramMessage);
               delivery.telegram = 'sent_without_call_button';
             } catch (retryError) {
+              delivery.telegram = 'failed';
               console.error('Telegram delivery failed:', retryError);
               await logDeliveryError({ channel: 'telegram', eventName, user, message: getErrorMessage(retryError), details: { delivery } });
-              return NextResponse.json(
-                { success: false, error: 'Failed to send Telegram message', delivery },
-                { status: 500 }
-              );
             }
           } else {
+            delivery.telegram = 'failed';
             console.error('Telegram delivery failed:', error);
             await logDeliveryError({ channel: 'telegram', eventName, user, message: getErrorMessage(error), details: { delivery } });
-            return NextResponse.json(
-              { success: false, error: 'Failed to send Telegram message', delivery },
-              { status: 500 }
-            );
           }
         }
       }
@@ -134,12 +152,9 @@ export async function POST(request: Request) {
           await sendWebhookNotificationEmail(user.email, emailMessage, phone);
           delivery.email = 'sent';
         } catch (error) {
+          delivery.email = 'failed';
           console.error('Email delivery failed:', error);
           await logDeliveryError({ channel: 'email', eventName, user, message: getErrorMessage(error), details: { delivery } });
-          return NextResponse.json(
-            { success: false, error: 'Failed to send email notification', delivery },
-            { status: 500 }
-          );
         }
       }
     } else {
@@ -183,12 +198,9 @@ export async function POST(request: Request) {
               const newUsage = await incrementMonthlySmsUsage(user.id, month);
               delivery.sms = `sent_${newUsage}/${planLimit}`;
             } catch (error) {
+              delivery.sms = 'failed';
               console.error('SMS delivery failed:', error);
               await logDeliveryError({ channel: 'sms', eventName, user, message: getErrorMessage(error), details: { delivery } });
-              return NextResponse.json(
-                { success: false, error: 'Failed to send SMS notification', delivery },
-                { status: 500 }
-              );
             }
           }
         }
@@ -197,14 +209,28 @@ export async function POST(request: Request) {
       delivery.sms = 'disabled_for_user';
     }
 
-    if (!delivery.telegram.startsWith('sent') && delivery.email !== 'sent' && delivery.sms !== 'sent') {
-      return NextResponse.json({ success: true, message: 'No delivery channel sent', delivery });
+    const anySent = delivery.telegram.startsWith('sent') || delivery.email === 'sent' || delivery.sms.startsWith('sent');
+    const anyFailed = delivery.telegram === 'failed' || delivery.email === 'failed' || delivery.sms === 'failed';
+    const status = anySent ? (anyFailed ? 'processed_with_channel_errors' : 'processed') : anyFailed ? 'accepted_with_channel_errors' : 'no_channel_sent';
+
+    if (receipt?.dedupeEnabled) {
+      await markWebhookReceiptProcessed(receipt.dedupKey, delivery, status);
     }
 
-    return NextResponse.json({ success: true, delivery });
+    return NextResponse.json({
+      success: true,
+      accepted: true,
+      status,
+      delivery,
+    });
   } catch (error) {
     console.error(error);
-    return NextResponse.json({ success: false, error: 'Server error' }, { status: 500 });
+
+    if (receipt?.dedupeEnabled) {
+      await markWebhookReceiptProcessed(receipt.dedupKey, { error: getErrorMessage(error) }, 'failed_before_response');
+    }
+
+    return NextResponse.json({ success: false, error: 'Server error', event: eventName }, { status: 500 });
   }
 }
 
