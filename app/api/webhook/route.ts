@@ -10,6 +10,7 @@ import { getCurrentSmsUsageMonth, getMonthlySmsUsage, getPlanSmsLimit, increment
 import { logDeliveryError } from '@/lib/monitoring';
 import { translateWebhookPayloadToGerman } from '@/lib/translate';
 import { createWebhookReceipt, markWebhookReceiptProcessed } from '@/lib/webhook-dedupe';
+import { getCallNotificationKind, getInboundHoldMs, markCallNotificationProcessed, reserveCallNotification, sleep } from '@/lib/call-notification-dedupe';
 
 /**
  * Public webhook endpoint.
@@ -87,6 +88,8 @@ export async function POST(request: Request) {
       'routing.sms_events',
       'template.telegram',
       'template.email',
+      'template.telegram.human_escalation',
+      'template.email.human_escalation',
       'template.sms',
       'translation.provider',
       'translation.translate_ai_summary',
@@ -96,27 +99,71 @@ export async function POST(request: Request) {
       'openai.translation_model',
       'deepl.api_key',
       'deepl.api_url',
+      'dedupe.call_completed_hold_ms',
     ]);
 
+    const notificationKind = getCallNotificationKind(eventName, payload);
     const notificationPayload = await translateWebhookPayloadToGerman(payload, settings);
     const phone = extractPhoneFromWebhook(notificationPayload);
     const callButton = buildTelegramCallButton(notificationPayload);
 
-    const telegramMessage = renderWebhookTemplate(notificationPayload, settings['template.telegram']);
-    const emailMessage = renderWebhookTemplate(notificationPayload, settings['template.email']);
+    const telegramTemplate = selectNotificationTemplate(settings, 'telegram', notificationKind);
+    const emailTemplate = selectNotificationTemplate(settings, 'email', notificationKind);
+    const telegramMessage = renderWebhookTemplate(notificationPayload, telegramTemplate);
+    const emailMessage = renderWebhookTemplate(notificationPayload, emailTemplate);
 
     const delivery: Record<string, string> = {
       event: eventName || 'unknown',
+      kind: notificationKind,
       telegram: 'skipped',
       email: 'skipped',
       sms: 'skipped',
     };
+
+    const telegramCanAttempt =
+      user.notify_telegram !== false &&
+      shouldDeliverForEvent(settings['routing.telegram_events'], eventName) &&
+      Boolean(user.telegram_chat_id);
+
+    const emailCanAttempt =
+      user.notify_email !== false &&
+      shouldDeliverForEvent(settings['routing.email_events'], eventName) &&
+      Boolean(user.email);
+
+    let callNotificationReservation: Awaited<ReturnType<typeof reserveCallNotification>> = {
+      dedupeEnabled: false,
+      shouldSend: true,
+      reason: 'not_needed',
+    };
+
+    if (telegramCanAttempt || emailCanAttempt) {
+      const holdMs = getInboundHoldMs(settings, eventName, notificationKind);
+      if (holdMs > 0) {
+        await sleep(holdMs);
+        delivery.call_notification_hold_ms = String(holdMs);
+      }
+
+      callNotificationReservation = await reserveCallNotification({
+        userId: String(user.id),
+        eventName,
+        payload: notificationPayload,
+        kind: notificationKind,
+      });
+
+      if (!callNotificationReservation.shouldSend) {
+        delivery.call_notification = `suppressed_same_call${callNotificationReservation.existingEvent ? `_already_${callNotificationReservation.existingEvent}` : ''}`;
+      } else if (callNotificationReservation.dedupeEnabled) {
+        delivery.call_notification = 'reserved';
+      }
+    }
 
     if (user.notify_telegram !== false) {
       if (!shouldDeliverForEvent(settings['routing.telegram_events'], eventName)) {
         delivery.telegram = 'event_not_enabled';
       } else if (!user.telegram_chat_id) {
         delivery.telegram = 'missing_chat_id';
+      } else if (!callNotificationReservation.shouldSend) {
+        delivery.telegram = 'suppressed_same_call';
       } else {
         try {
           await sendTelegramMessage(user.telegram_chat_id, telegramMessage, callButton);
@@ -147,6 +194,8 @@ export async function POST(request: Request) {
         delivery.email = 'event_not_enabled';
       } else if (!user.email) {
         delivery.email = 'missing_email';
+      } else if (!callNotificationReservation.shouldSend) {
+        delivery.email = 'suppressed_same_call';
       } else {
         try {
           await sendWebhookNotificationEmail(user.email, emailMessage, phone);
@@ -213,6 +262,10 @@ export async function POST(request: Request) {
     const anyFailed = delivery.telegram === 'failed' || delivery.email === 'failed' || delivery.sms === 'failed';
     const status = anySent ? (anyFailed ? 'processed_with_channel_errors' : 'processed') : anyFailed ? 'accepted_with_channel_errors' : 'no_channel_sent';
 
+    if (callNotificationReservation?.dedupeEnabled && callNotificationReservation.shouldSend) {
+      await markCallNotificationProcessed(callNotificationReservation.notificationKey, delivery, status);
+    }
+
     if (receipt?.dedupeEnabled) {
       await markWebhookReceiptProcessed(receipt.dedupKey, delivery, status);
     }
@@ -232,6 +285,15 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: false, error: 'Server error', event: eventName }, { status: 500 });
   }
+}
+
+function selectNotificationTemplate(settings: Record<string, string>, channel: 'telegram' | 'email', kind: string) {
+  if (kind === 'human_escalation') {
+    const humanTemplate = settings[`template.${channel}.human_escalation`];
+    if (humanTemplate && humanTemplate.trim()) return humanTemplate;
+  }
+
+  return settings[`template.${channel}`] || '';
 }
 
 function getErrorMessage(error: unknown) {

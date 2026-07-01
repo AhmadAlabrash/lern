@@ -12,13 +12,13 @@ const routingFields = [
     key: 'routing.telegram_events',
     label: 'Telegram events',
     description: 'Telegram sends only for these event names. One event per line. Use * for all events.',
-    placeholder: 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
+    placeholder: 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.requested\nhuman_escalation.requested\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
   },
   {
     key: 'routing.email_events',
     label: 'Email events',
     description: 'Email sends only for these event names. One event per line. Use * for all events.',
-    placeholder: 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
+    placeholder: 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.requested\nhuman_escalation.requested\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
   },
   {
     key: 'routing.sms_events',
@@ -38,6 +38,16 @@ const templateFields = [
     key: 'template.email',
     label: 'Email event message template',
     rows: 16,
+  },
+  {
+    key: 'template.telegram.human_escalation',
+    label: 'Telegram human escalation template',
+    rows: 14,
+  },
+  {
+    key: 'template.email.human_escalation',
+    label: 'Email human escalation template',
+    rows: 14,
   },
   {
     key: 'template.sms',
@@ -111,6 +121,15 @@ const placeholders = [
   '{conversation_id}',
   '{call_sid}',
   '{agent_id}',
+  '{agent_name}',
+  '{escalation_status}',
+  '{escalation_intent}',
+  '{escalation_source}',
+  '{escalation_requested_at}',
+  '{appointment_status}',
+  '{appointment_intent}',
+  '{appointment_source}',
+  '{appointment_requested_at}',
   '{classification}',
   '{sentiment}',
   '{booking_url}',
@@ -262,6 +281,23 @@ export default function GlobalSettings() {
                   />
                 </Card>
               ))}
+              <Card>
+                <Label
+                  title="Smart duplicate delay"
+                  description="Delay normal inbound_call.completed notifications briefly so appointment.requested or human_escalation.requested can replace them with the better template. Recommended: 3000 ms."
+                />
+                <input
+                  type="number"
+                  min="0"
+                  max="7000"
+                  value={settings['dedupe.call_completed_hold_ms'] || '3000'}
+                  onChange={(event) => update('dedupe.call_completed_hold_ms', event.target.value)}
+                  className="mt-4 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-3xl font-black text-slate-950 outline-none transition focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                />
+                <p className="mt-3 text-xs leading-5 text-slate-500">
+                  Set 0 to disable. Keep below 7000 ms to avoid slow webhook responses.
+                </p>
+              </Card>
             </div>
           )}
 

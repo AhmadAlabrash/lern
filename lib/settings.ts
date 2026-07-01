@@ -1,8 +1,8 @@
 import { createServiceSupabaseClient } from './supabase';
 
 export const SETTINGS_DEFAULTS: Record<string, string> = {
-  'routing.telegram_events': 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.requested\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
-  'routing.email_events': 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.requested\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
+  'routing.telegram_events': 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.requested\nhuman_escalation.requested\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
+  'routing.email_events': 'webhook.test\ninbound_call.completed\ninbound_call.failed\ninbound_call.missed\nappointment.needed\nappointment.requested\nhuman_escalation.requested\nappointment.confirmed\nappointment.cancelled\nappointment.canceled',
   'routing.sms_events': 'appointment.needed\nappointment.requested',
 
   'template.telegram': `📞 Neuer Anruf eingegangen
@@ -85,6 +85,70 @@ Agent ID: {agent_id}
 
 KI-Rezeption – Ihre digitale Rezeption`,
 
+  'template.telegram.human_escalation': `🚨 Menschliche Hilfe angefragt
+
+Ein Anrufer möchte mit einem Menschen sprechen. Bitte zeitnah prüfen oder zurückrufen.
+
+👤 Kontakt:
+Name: {contact_name}
+Telefon: {contact_phone}
+
+📞 Anrufdetails:
+Status: {status}
+Dauer: {duration}
+Anrufer: {from_number}
+Angerufene Nummer: {to_number}
+Zeitpunkt: {timestamp}
+
+📝 Anliegen:
+{summary}
+
+💬 Gesprächsauszug:
+{transcript}
+
+📞 Rückruf:
+{contact_phone}
+
+🧾 IDs:
+Call ID: {call_id}
+Conversation ID: {conversation_id}
+Call SID: {call_sid}
+Agent: {agent_name}
+
+KI-Rezeption – Menschliche Unterstützung erforderlich`,
+
+  'template.email.human_escalation': `🚨 Menschliche Hilfe angefragt
+
+Ein Anrufer möchte mit einem Menschen sprechen. Bitte zeitnah prüfen oder zurückrufen.
+
+👤 Kontakt:
+Name: {contact_name}
+Telefon: {contact_phone}
+
+📞 Anrufdetails:
+Status: {status}
+Dauer: {duration}
+Anrufer: {from_number}
+Angerufene Nummer: {to_number}
+Zeitpunkt: {timestamp}
+
+📝 Anliegen:
+{summary}
+
+💬 Gesprächsauszug:
+{transcript}
+
+📞 Rückruf:
+{contact_phone}
+
+🧾 IDs:
+Call ID: {call_id}
+Conversation ID: {conversation_id}
+Call SID: {call_sid}
+Agent: {agent_name}
+
+KI-Rezeption – Menschliche Unterstützung erforderlich`,
+
   'template.sms':
     'Danke für deinen Anruf. Deinen Termin kannst du hier buchen: {booking_url} Für weitere Hilfe erreichst du uns auf WhatsApp: {whatsapp_link}',
 
@@ -123,6 +187,10 @@ KI-Rezeption`,
   'twilio.auth_token': '',
   'twilio.messaging_service_sid': '',
   'sms.default_provider': 'twilio',
+
+  // Smart call notification dedupe. Normal call-completed emails wait briefly
+  // so a more specific appointment/human event can take over and avoid 2 emails.
+  'dedupe.call_completed_hold_ms': '3000',
 
   // Translation settings for webhook notification text.
   // provider: off | openai | deepl

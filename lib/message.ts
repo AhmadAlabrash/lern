@@ -104,6 +104,9 @@ export function buildWebhookTemplateValues(payload: any): Record<string, string>
   const data = payload?.data || {};
   const call = data?.call || {};
   const contact = data?.contact || {};
+  const agent = data?.agent || {};
+  const humanEscalation = data?.humanEscalation || data?.human_escalation || {};
+  const appointmentRequest = data?.appointmentRequest || data?.appointment_request || {};
 
   const event = cleanText(payload?.event);
   const direction = cleanText(data?.direction || call?.direction || payload?.direction);
@@ -164,8 +167,19 @@ export function buildWebhookTemplateValues(payload: any): Record<string, string>
 
     call_id: cleanText(data?.callId || call?.id || call?.callId || payload?.callId),
     conversation_id: cleanText(data?.conversationId || call?.conversationId || payload?.conversationId),
-    call_sid: cleanText(data?.callSid || call?.sid || payload?.callSid),
-    agent_id: cleanText(data?.agentId || data?.elevenLabsAgentId || call?.agentId || payload?.agentId),
+    call_sid: cleanText(data?.callSid || call?.callSid || call?.sid || payload?.callSid),
+    agent_id: cleanText(data?.agentId || data?.elevenLabsAgentId || agent?.id || agent?.elevenLabsAgentId || call?.agentId || payload?.agentId),
+    agent_name: cleanText(agent?.name || data?.agentName || payload?.agentName),
+
+    escalation_status: cleanText(humanEscalation?.status),
+    escalation_intent: cleanText(humanEscalation?.intent),
+    escalation_source: cleanText(humanEscalation?.source),
+    escalation_requested_at: formatGermanTimestamp(humanEscalation?.requestedAt),
+
+    appointment_status: cleanText(appointmentRequest?.status),
+    appointment_intent: cleanText(appointmentRequest?.intent),
+    appointment_source: cleanText(appointmentRequest?.source),
+    appointment_requested_at: formatGermanTimestamp(appointmentRequest?.requestedAt),
 
     classification: cleanText(call?.classification || data?.classification),
     sentiment: cleanText(call?.sentiment || data?.sentiment),
@@ -178,7 +192,7 @@ function cleanupRenderedTemplate(text: string) {
     .map((line) => line.trimEnd())
     .filter((line) => {
       // Remove common placeholder-only lines after their value was empty.
-      return !line.match(/^\s*(Name|Telefon|E-Mail|Firma|Adresse|Event|Richtung|Status|Dauer|Klassifizierung|Stimmung|Aufnahme|Call ID|Conversation ID|Call SID|Agent ID|Transkript|Zusammenfassung|Anrufer|Angerufene Nummer|Rückruf):\s*$/i);
+      return !line.match(/^\s*(Name|Telefon|E-Mail|Firma|Adresse|Event|Richtung|Status|Dauer|Klassifizierung|Stimmung|Aufnahme|Call ID|Conversation ID|Call SID|Agent ID|Transkript|Zusammenfassung|Anrufer|Angerufene Nummer|Rückruf|Anliegen|Gesprächsauszug|Agent):\s*$/i);
     })
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
