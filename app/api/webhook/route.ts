@@ -11,21 +11,13 @@ import { logDeliveryError } from '@/lib/monitoring';
 import { translateWebhookPayloadToGerman } from '@/lib/translate';
 import { analyzeCompletedCallWithOpenAI } from '@/lib/call-ai';
 import { createWebhookReceipt, markWebhookReceiptProcessed } from '@/lib/webhook-dedupe';
-import { getCallNotificationKind, getInboundHoldMs, hasHigherPriorityCallEventReceipt, markCallNotificationProcessed, reserveCallNotification, shouldStillSendReservedCallNotification, sleep } from '@/lib/call-notification-dedupe';
+import { extractCallGroupId, getCallNotificationKind, getCallNotificationPriority, sleep } from '@/lib/call-notification-dedupe';
+import { claimCallNotificationQueue, markCallNotificationQueueSent, upsertCallNotificationQueue } from '@/lib/call-notification-queue';
 
-export const maxDuration = 15;
+export const maxDuration = 30;
 
-/**
- * Public webhook endpoint.
- *
- * Important behavior:
- * - Auth / invalid JSON still return errors.
- * - After a valid event is accepted, delivery-channel failures are logged but
- *   the endpoint still returns 200. This prevents the upstream webhook sender
- *   from retrying and creating duplicate emails/Telegram/SMS notifications.
- * - Idempotency is handled by webhook_event_receipts, so the same callId /
- *   conversationId / callSid is only notified once even if the sender retries.
- */
+type DeliveryMap = Record<string, string>;
+
 export async function POST(request: Request) {
   let receipt: Awaited<ReturnType<typeof createWebhookReceipt>> | null = null;
   let eventName = 'unknown';
@@ -105,103 +97,85 @@ export async function POST(request: Request) {
       'ai.human_support_confidence_threshold',
       'deepl.api_key',
       'deepl.api_url',
+      'dedupe.call_notification_settle_ms',
       'dedupe.call_completed_hold_ms',
     ]);
 
-    const baseNotificationKind = getCallNotificationKind(eventName, payload);
-
-    const delivery: Record<string, string> = {
+    const originalKind = getCallNotificationKind(eventName, payload);
+    const delivery: DeliveryMap = {
       event: eventName || 'unknown',
-      kind: baseNotificationKind,
+      kind: originalKind,
       telegram: 'skipped',
       email: 'skipped',
       sms: 'skipped',
     };
 
-    const telegramCanAttempt =
+    const originalTelegramAllowed =
       user.notify_telegram !== false &&
       shouldDeliverForEvent(settings['routing.telegram_events'], eventName) &&
       Boolean(user.telegram_chat_id);
 
-    const emailCanAttempt =
+    const originalEmailAllowed =
       user.notify_email !== false &&
       shouldDeliverForEvent(settings['routing.email_events'], eventName) &&
       Boolean(user.email);
 
-    let callNotificationReservation: Awaited<ReturnType<typeof reserveCallNotification>> = {
-      dedupeEnabled: false,
-      shouldSend: true,
-      reason: 'not_needed',
-    };
+    const callGroupId = extractCallGroupId(payload);
+    const shouldUseOneCallQueue =
+      Boolean(callGroupId) &&
+      (originalKind === 'call_completed' || originalKind === 'human_escalation') &&
+      (originalTelegramAllowed || originalEmailAllowed);
 
-    if (telegramCanAttempt || emailCanAttempt) {
-      // Reserve first, before the delay. This allows a later high-priority
-      // event for the same callId, such as human_escalation.requested, to
-      // upgrade this pending reservation and prevent a plain call notification.
-      callNotificationReservation = await reserveCallNotification({
+    let shouldSendEmailTelegram = originalTelegramAllowed || originalEmailAllowed;
+    let notificationEventName = eventName;
+    let notificationKind = originalKind;
+    let notificationPayload = payload;
+    let queueGroupId = callGroupId;
+    let queueEnabled = false;
+
+    if (shouldUseOneCallQueue && callGroupId) {
+      const queued = await upsertCallNotificationQueue({
         userId: String(user.id),
+        groupId: callGroupId,
         eventName,
-        payload: payload,
-        kind: baseNotificationKind,
+        kind: originalKind,
+        priority: getCallNotificationPriority(originalKind),
+        payload,
       });
 
-      if (callNotificationReservation.shouldSend) {
-        // First, immediately check the general event receipts. This catches the
-        // real production order where human_escalation.requested arrived first
-        // and inbound_call.completed arrived a few seconds later. In that case
-        // the plain completed-call notification must be suppressed before any
-        // OpenAI translation/classification happens.
-        const alreadyAcceptedHigherEvent = await hasHigherPriorityCallEventReceipt(
-          String(user.id),
-          payload,
-          baseNotificationKind
-        );
+      queueEnabled = queued.queueEnabled;
+      delivery.call_queue = queued.queueEnabled ? `queued_${originalKind}` : `queue_unavailable_${queued.reason || 'unknown'}`;
 
-        if (alreadyAcceptedHigherEvent.found) {
-          callNotificationReservation.shouldSend = false;
-          delivery.call_notification = `suppressed_${alreadyAcceptedHigherEvent.event || 'higher_priority_event'}_same_call`;
+      if (queued.queueEnabled) {
+        const settleMs = getCallNotificationSettleMs(settings);
+        await sleep(settleMs);
+        delivery.call_queue_wait_ms = String(settleMs);
+
+        const claimed = await claimCallNotificationQueue(String(user.id), callGroupId);
+
+        if (!claimed) {
+          shouldSendEmailTelegram = false;
+          delivery.call_queue = 'suppressed_already_claimed_or_sent';
+        } else {
+          queueGroupId = claimed.groupId;
+          notificationEventName = claimed.eventName || eventName;
+          notificationKind = claimed.kind;
+          notificationPayload = claimed.payload || payload;
+          shouldSendEmailTelegram = true;
+          delivery.call_queue = `claimed_${notificationKind}`;
+          delivery.notification_event = notificationEventName;
+          delivery.notification_kind = notificationKind;
         }
-      }
-
-      if (callNotificationReservation.shouldSend) {
-        const holdMs = getInboundHoldMs(settings, eventName, baseNotificationKind);
-        if (holdMs > 0) {
-          await sleep(holdMs);
-          delivery.call_notification_hold_ms = String(holdMs);
-
-          const stillOwnsReservation = await shouldStillSendReservedCallNotification(
-            callNotificationReservation.notificationKey,
-            eventName,
-            baseNotificationKind
-          );
-
-          const higherEventAfterHold = await hasHigherPriorityCallEventReceipt(
-            String(user.id),
-            payload,
-            baseNotificationKind
-          );
-
-          if (!stillOwnsReservation || higherEventAfterHold.found) {
-            callNotificationReservation.shouldSend = false;
-            delivery.call_notification = higherEventAfterHold.found
-              ? `suppressed_${higherEventAfterHold.event || 'higher_priority_event'}_same_call_after_hold`
-              : 'suppressed_higher_priority_same_call';
-          }
-        }
-      }
-
-      if (!callNotificationReservation.shouldSend) {
-        delivery.call_notification = delivery.call_notification || `suppressed_same_call${callNotificationReservation.existingEvent ? `_already_${callNotificationReservation.existingEvent}` : ''}`;
-      } else if (callNotificationReservation.dedupeEnabled) {
-        delivery.call_notification = callNotificationReservation.reason || 'reserved';
       }
     }
 
-    let notificationKind = baseNotificationKind;
-    let notificationPayload = payload;
-
-    if (callNotificationReservation.shouldSend) {
-      const smartAnalysis = await analyzeCompletedCallWithOpenAI(payload, settings, eventName, baseNotificationKind);
+    if (shouldSendEmailTelegram) {
+      const smartAnalysis = await analyzeCompletedCallWithOpenAI(
+        notificationPayload,
+        settings,
+        notificationEventName,
+        notificationKind
+      );
 
       if (smartAnalysis.used) {
         notificationPayload = smartAnalysis.payload;
@@ -209,27 +183,16 @@ export async function POST(request: Request) {
         delivery.ai_human_support_confidence = smartAnalysis.confidence !== undefined ? String(smartAnalysis.confidence) : '';
         if (smartAnalysis.reasonDe) delivery.ai_human_support_reason = smartAnalysis.reasonDe;
 
-        if (smartAnalysis.needsHumanSupport) {
-          if (eventName === 'inbound_call.completed' || eventName === 'outbound_call.completed') {
-            // IMPORTANT: Do not send a Human template from the plain completed-call event.
-            // If a dedicated human_escalation.requested webhook is enabled, that event is
-            // the one that should notify the team. Sending from inbound_call.completed too
-            // is exactly what created duplicate Human notifications. This guard works even
-            // if the database dedupe tables/migrations are missing or delayed.
-            callNotificationReservation.shouldSend = false;
-            delivery.call_notification = 'suppressed_completed_call_ai_detected_human_support_wait_for_human_event';
-            delivery.email = 'suppressed_same_call';
-            delivery.telegram = 'suppressed_same_call';
-          } else {
-            notificationKind = 'human_escalation';
-            delivery.kind = notificationKind;
-          }
+        // This is now safe: after the queue settle/claim window, if the winning
+        // event is still inbound_call.completed and OpenAI says a human is needed,
+        // we send ONE Human template from this claimed row. A later duplicate event
+        // cannot send because the queue is already claimed/sent.
+        if (smartAnalysis.needsHumanSupport && notificationKind === 'call_completed') {
+          notificationKind = 'human_escalation';
+          delivery.notification_kind = notificationKind;
         }
 
-        if (callNotificationReservation.shouldSend && (settings['translation.translate_transcript'] || 'false') === 'true') {
-          // The smart OpenAI call already translated the summary. If the admin
-          // also wants the transcript translated, translate only the transcript
-          // here to avoid paying to translate the summary twice.
+        if ((settings['translation.translate_transcript'] || 'false') === 'true') {
           notificationPayload = await translateWebhookPayloadToGerman(notificationPayload, {
             ...settings,
             'translation.translate_ai_summary': 'false',
@@ -237,52 +200,23 @@ export async function POST(request: Request) {
         }
       } else {
         if (smartAnalysis.error) delivery.ai_human_support = `not_used_${smartAnalysis.error}`.slice(0, 180);
-        notificationPayload = await translateWebhookPayloadToGerman(payload, settings);
-      }
-    } else {
-      // The Email/Telegram notification is suppressed for this call, so avoid
-      // paid translation/AI calls. SMS routing below can still use the original
-      // payload if the event is SMS-enabled.
-      notificationPayload = payload;
-    }
-
-    // Final guard before sending Email/Telegram. This closes the race where a
-    // human_escalation.requested event arrives while the completed-call webhook
-    // is waiting on OpenAI translation/classification.
-    if (callNotificationReservation.shouldSend && baseNotificationKind === 'call_completed') {
-      const stillOwnsReservation = await shouldStillSendReservedCallNotification(
-        callNotificationReservation.notificationKey,
-        eventName,
-        baseNotificationKind
-      );
-      const higherEventBeforeSend = await hasHigherPriorityCallEventReceipt(
-        String(user.id),
-        payload,
-        baseNotificationKind
-      );
-
-      if (!stillOwnsReservation || higherEventBeforeSend.found) {
-        callNotificationReservation.shouldSend = false;
-        delivery.call_notification = higherEventBeforeSend.found
-          ? `suppressed_${higherEventBeforeSend.event || 'higher_priority_event'}_same_call_before_send`
-          : 'suppressed_higher_priority_same_call_before_send';
+        notificationPayload = await translateWebhookPayloadToGerman(notificationPayload, settings);
       }
     }
 
     const phone = extractPhoneFromWebhook(notificationPayload);
     const callButton = buildTelegramCallButton(notificationPayload);
-
     const telegramTemplate = selectNotificationTemplate(settings, 'telegram', notificationKind);
     const emailTemplate = selectNotificationTemplate(settings, 'email', notificationKind);
     const telegramMessage = renderWebhookTemplate(notificationPayload, telegramTemplate);
     const emailMessage = renderWebhookTemplate(notificationPayload, emailTemplate);
 
     if (user.notify_telegram !== false) {
-      if (!shouldDeliverForEvent(settings['routing.telegram_events'], eventName)) {
+      if (!shouldDeliverForEvent(settings['routing.telegram_events'], notificationEventName)) {
         delivery.telegram = 'event_not_enabled';
       } else if (!user.telegram_chat_id) {
         delivery.telegram = 'missing_chat_id';
-      } else if (!callNotificationReservation.shouldSend) {
+      } else if (!shouldSendEmailTelegram) {
         delivery.telegram = 'suppressed_same_call';
       } else {
         try {
@@ -296,12 +230,12 @@ export async function POST(request: Request) {
             } catch (retryError) {
               delivery.telegram = 'failed';
               console.error('Telegram delivery failed:', retryError);
-              await logDeliveryError({ channel: 'telegram', eventName, user, message: getErrorMessage(retryError), details: { delivery } });
+              await logDeliveryError({ channel: 'telegram', eventName: notificationEventName, user, message: getErrorMessage(retryError), details: { delivery } });
             }
           } else {
             delivery.telegram = 'failed';
             console.error('Telegram delivery failed:', error);
-            await logDeliveryError({ channel: 'telegram', eventName, user, message: getErrorMessage(error), details: { delivery } });
+            await logDeliveryError({ channel: 'telegram', eventName: notificationEventName, user, message: getErrorMessage(error), details: { delivery } });
           }
         }
       }
@@ -310,11 +244,11 @@ export async function POST(request: Request) {
     }
 
     if (user.notify_email !== false) {
-      if (!shouldDeliverForEvent(settings['routing.email_events'], eventName)) {
+      if (!shouldDeliverForEvent(settings['routing.email_events'], notificationEventName)) {
         delivery.email = 'event_not_enabled';
       } else if (!user.email) {
         delivery.email = 'missing_email';
-      } else if (!callNotificationReservation.shouldSend) {
+      } else if (!shouldSendEmailTelegram) {
         delivery.email = 'suppressed_same_call';
       } else {
         try {
@@ -323,18 +257,26 @@ export async function POST(request: Request) {
         } catch (error) {
           delivery.email = 'failed';
           console.error('Email delivery failed:', error);
-          await logDeliveryError({ channel: 'email', eventName, user, message: getErrorMessage(error), details: { delivery } });
+          await logDeliveryError({ channel: 'email', eventName: notificationEventName, user, message: getErrorMessage(error), details: { delivery } });
         }
       }
     } else {
       delivery.email = 'disabled_for_user';
     }
 
+    if (queueEnabled && queueGroupId && shouldUseOneCallQueue) {
+      await markCallNotificationQueueSent(String(user.id), queueGroupId, delivery, shouldSendEmailTelegram ? 'sent' : 'suppressed');
+    }
+
+    // SMS stays event-based and independent from the one-call Email/Telegram queue.
+    // This keeps appointment.requested SMS working even when call notifications are
+    // suppressed or merged.
     if (user.notify_sms === true) {
       if (!shouldDeliverForEvent(settings['routing.sms_events'], eventName)) {
         delivery.sms = 'event_not_enabled';
       } else {
-        const smsTo = normalizePhoneForSms(phone);
+        const smsPhone = extractPhoneFromWebhook(payload);
+        const smsTo = normalizePhoneForSms(smsPhone);
 
         if (!smsTo) {
           delivery.sms = 'missing_phone';
@@ -353,8 +295,8 @@ export async function POST(request: Request) {
                 template: settings['template.sms'],
                 bookingUrl: user.booking_url,
                 whatsappNumber: user.whatsapp_number,
-                contactName: extractContactNameFromWebhook(notificationPayload),
-                contactPhone: phone,
+                contactName: extractContactNameFromWebhook(payload),
+                contactPhone: smsPhone,
                 eventName,
               });
 
@@ -382,14 +324,6 @@ export async function POST(request: Request) {
     const anyFailed = delivery.telegram === 'failed' || delivery.email === 'failed' || delivery.sms === 'failed';
     const status = anySent ? (anyFailed ? 'processed_with_channel_errors' : 'processed') : anyFailed ? 'accepted_with_channel_errors' : 'no_channel_sent';
 
-    if (callNotificationReservation?.dedupeEnabled) {
-      await markCallNotificationProcessed(
-        callNotificationReservation.notificationKey,
-        delivery,
-        callNotificationReservation.shouldSend ? status : 'suppressed_same_call'
-      );
-    }
-
     if (receipt?.dedupeEnabled) {
       await markWebhookReceiptProcessed(receipt.dedupKey, delivery, status);
     }
@@ -409,6 +343,12 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: false, error: 'Server error', event: eventName }, { status: 500 });
   }
+}
+
+function getCallNotificationSettleMs(settings: Record<string, string>) {
+  const raw = Number(settings['dedupe.call_notification_settle_ms'] || settings['dedupe.call_completed_hold_ms'] || '10000');
+  if (!Number.isFinite(raw)) return 10000;
+  return Math.max(3000, Math.min(14000, Math.round(raw)));
 }
 
 function selectNotificationTemplate(settings: Record<string, string>, channel: 'telegram' | 'email', kind: string) {
