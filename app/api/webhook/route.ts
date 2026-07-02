@@ -11,8 +11,8 @@ import { logDeliveryError } from '@/lib/monitoring';
 import { translateWebhookPayloadToGerman } from '@/lib/translate';
 import { analyzeCompletedCallWithOpenAI } from '@/lib/call-ai';
 import { createWebhookReceipt, markWebhookReceiptProcessed } from '@/lib/webhook-dedupe';
-import { extractCallGroupId, getCallNotificationKind, getCallNotificationPriority, sleep } from '@/lib/call-notification-dedupe';
-import { claimCallNotificationQueue, markCallNotificationQueueSent, upsertCallNotificationQueue } from '@/lib/call-notification-queue';
+import { extractCallGroupId, getCallNotificationKind, sleep } from '@/lib/call-notification-dedupe';
+import { claimCallCompletedGuard, claimHumanEscalationGuard, isCallBlockedByHumanOrSent, prepareCallCompletedGuard } from '@/lib/call-notification-guard';
 
 export const maxDuration = 30;
 
@@ -121,7 +121,7 @@ export async function POST(request: Request) {
       Boolean(user.email);
 
     const callGroupId = extractCallGroupId(payload);
-    const shouldUseOneCallQueue =
+    const shouldUseCallGuard =
       Boolean(callGroupId) &&
       (originalKind === 'call_completed' || originalKind === 'human_escalation') &&
       (originalTelegramAllowed || originalEmailAllowed);
@@ -130,41 +130,49 @@ export async function POST(request: Request) {
     let notificationEventName = eventName;
     let notificationKind = originalKind;
     let notificationPayload = payload;
-    let queueGroupId = callGroupId;
-    let queueEnabled = false;
+    let needsFinalCallGuardClaim = false;
 
-    if (shouldUseOneCallQueue && callGroupId) {
-      const queued = await upsertCallNotificationQueue({
-        userId: String(user.id),
-        groupId: callGroupId,
-        eventName,
-        kind: originalKind,
-        priority: getCallNotificationPriority(originalKind),
-        payload,
-      });
+    if (shouldUseCallGuard && callGroupId) {
+      if (originalKind === 'human_escalation') {
+        const guard = await claimHumanEscalationGuard({
+          userId: String(user.id),
+          groupId: callGroupId,
+          eventName,
+          kind: originalKind,
+          payload,
+        });
 
-      queueEnabled = queued.queueEnabled;
-      delivery.call_queue = queued.queueEnabled ? `queued_${originalKind}` : `queue_unavailable_${queued.reason || 'unknown'}`;
+        delivery.call_guard = guard.reason;
+        shouldSendEmailTelegram = guard.shouldSend;
+      }
 
-      if (queued.queueEnabled) {
-        const settleMs = getCallNotificationSettleMs(settings);
-        await sleep(settleMs);
-        delivery.call_queue_wait_ms = String(settleMs);
+      if (originalKind === 'call_completed') {
+        const prepared = await prepareCallCompletedGuard({
+          userId: String(user.id),
+          groupId: callGroupId,
+          eventName,
+          kind: originalKind,
+          payload,
+        });
 
-        const claimed = await claimCallNotificationQueue(String(user.id), callGroupId);
+        delivery.call_guard = prepared.reason;
 
-        if (!claimed) {
+        if (!prepared.shouldSend) {
           shouldSendEmailTelegram = false;
-          delivery.call_queue = 'suppressed_already_claimed_or_sent';
         } else {
-          queueGroupId = claimed.groupId;
-          notificationEventName = claimed.eventName || eventName;
-          notificationKind = claimed.kind;
-          notificationPayload = claimed.payload || payload;
-          shouldSendEmailTelegram = true;
-          delivery.call_queue = `claimed_${notificationKind}`;
-          delivery.notification_event = notificationEventName;
-          delivery.notification_kind = notificationKind;
+          const settleMs = getCallNotificationSettleMs(settings);
+          await sleep(settleMs);
+          delivery.call_guard_wait_ms = String(settleMs);
+
+          const afterWait = await isCallBlockedByHumanOrSent(String(user.id), callGroupId);
+          delivery.call_guard_after_wait = afterWait.reason;
+
+          if (!afterWait.shouldSend) {
+            shouldSendEmailTelegram = false;
+          } else {
+            shouldSendEmailTelegram = true;
+            needsFinalCallGuardClaim = true;
+          }
         }
       }
     }
@@ -183,10 +191,8 @@ export async function POST(request: Request) {
         delivery.ai_human_support_confidence = smartAnalysis.confidence !== undefined ? String(smartAnalysis.confidence) : '';
         if (smartAnalysis.reasonDe) delivery.ai_human_support_reason = smartAnalysis.reasonDe;
 
-        // This is now safe: after the queue settle/claim window, if the winning
-        // event is still inbound_call.completed and OpenAI says a human is needed,
-        // we send ONE Human template from this claimed row. A later duplicate event
-        // cannot send because the queue is already claimed/sent.
+        // If no dedicated human_escalation event arrived during the wait window,
+        // OpenAI may still choose the Human template for this one final notification.
         if (smartAnalysis.needsHumanSupport && notificationKind === 'call_completed') {
           notificationKind = 'human_escalation';
           delivery.notification_kind = notificationKind;
@@ -201,6 +207,24 @@ export async function POST(request: Request) {
       } else {
         if (smartAnalysis.error) delivery.ai_human_support = `not_used_${smartAnalysis.error}`.slice(0, 180);
         notificationPayload = await translateWebhookPayloadToGerman(notificationPayload, settings);
+      }
+    }
+
+    if (needsFinalCallGuardClaim && callGroupId && shouldSendEmailTelegram) {
+      const finalGuard = await claimCallCompletedGuard(
+        {
+          userId: String(user.id),
+          groupId: callGroupId,
+          eventName: notificationEventName,
+          kind: originalKind,
+          payload: notificationPayload,
+        },
+        notificationKind
+      );
+
+      delivery.call_guard_final = finalGuard.reason;
+      if (!finalGuard.shouldSend) {
+        shouldSendEmailTelegram = false;
       }
     }
 
@@ -262,10 +286,6 @@ export async function POST(request: Request) {
       }
     } else {
       delivery.email = 'disabled_for_user';
-    }
-
-    if (queueEnabled && queueGroupId && shouldUseOneCallQueue) {
-      await markCallNotificationQueueSent(String(user.id), queueGroupId, delivery, shouldSendEmailTelegram ? 'sent' : 'suppressed');
     }
 
     // SMS stays event-based and independent from the one-call Email/Telegram queue.
