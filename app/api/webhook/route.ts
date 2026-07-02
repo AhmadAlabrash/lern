@@ -11,7 +11,9 @@ import { logDeliveryError } from '@/lib/monitoring';
 import { translateWebhookPayloadToGerman } from '@/lib/translate';
 import { analyzeCompletedCallWithOpenAI } from '@/lib/call-ai';
 import { createWebhookReceipt, markWebhookReceiptProcessed } from '@/lib/webhook-dedupe';
-import { getCallNotificationKind, getInboundHoldMs, markCallNotificationProcessed, reserveCallNotification, shouldStillSendReservedCallNotification, sleep } from '@/lib/call-notification-dedupe';
+import { getCallNotificationKind, getInboundHoldMs, hasHigherPriorityCallEventReceipt, markCallNotificationProcessed, reserveCallNotification, shouldStillSendReservedCallNotification, sleep } from '@/lib/call-notification-dedupe';
+
+export const maxDuration = 15;
 
 /**
  * Public webhook endpoint.
@@ -144,6 +146,24 @@ export async function POST(request: Request) {
       });
 
       if (callNotificationReservation.shouldSend) {
+        // First, immediately check the general event receipts. This catches the
+        // real production order where human_escalation.requested arrived first
+        // and inbound_call.completed arrived a few seconds later. In that case
+        // the plain completed-call notification must be suppressed before any
+        // OpenAI translation/classification happens.
+        const alreadyAcceptedHigherEvent = await hasHigherPriorityCallEventReceipt(
+          String(user.id),
+          payload,
+          baseNotificationKind
+        );
+
+        if (alreadyAcceptedHigherEvent.found) {
+          callNotificationReservation.shouldSend = false;
+          delivery.call_notification = `suppressed_${alreadyAcceptedHigherEvent.event || 'higher_priority_event'}_same_call`;
+        }
+      }
+
+      if (callNotificationReservation.shouldSend) {
         const holdMs = getInboundHoldMs(settings, eventName, baseNotificationKind);
         if (holdMs > 0) {
           await sleep(holdMs);
@@ -155,9 +175,17 @@ export async function POST(request: Request) {
             baseNotificationKind
           );
 
-          if (!stillOwnsReservation) {
+          const higherEventAfterHold = await hasHigherPriorityCallEventReceipt(
+            String(user.id),
+            payload,
+            baseNotificationKind
+          );
+
+          if (!stillOwnsReservation || higherEventAfterHold.found) {
             callNotificationReservation.shouldSend = false;
-            delivery.call_notification = 'suppressed_higher_priority_same_call';
+            delivery.call_notification = higherEventAfterHold.found
+              ? `suppressed_${higherEventAfterHold.event || 'higher_priority_event'}_same_call_after_hold`
+              : 'suppressed_higher_priority_same_call';
           }
         }
       }
@@ -204,6 +232,29 @@ export async function POST(request: Request) {
       // paid translation/AI calls. SMS routing below can still use the original
       // payload if the event is SMS-enabled.
       notificationPayload = payload;
+    }
+
+    // Final guard before sending Email/Telegram. This closes the race where a
+    // human_escalation.requested event arrives while the completed-call webhook
+    // is waiting on OpenAI translation/classification.
+    if (callNotificationReservation.shouldSend && baseNotificationKind === 'call_completed') {
+      const stillOwnsReservation = await shouldStillSendReservedCallNotification(
+        callNotificationReservation.notificationKey,
+        eventName,
+        baseNotificationKind
+      );
+      const higherEventBeforeSend = await hasHigherPriorityCallEventReceipt(
+        String(user.id),
+        payload,
+        baseNotificationKind
+      );
+
+      if (!stillOwnsReservation || higherEventBeforeSend.found) {
+        callNotificationReservation.shouldSend = false;
+        delivery.call_notification = higherEventBeforeSend.found
+          ? `suppressed_${higherEventBeforeSend.event || 'higher_priority_event'}_same_call_before_send`
+          : 'suppressed_higher_priority_same_call_before_send';
+      }
     }
 
     const phone = extractPhoneFromWebhook(notificationPayload);
@@ -319,8 +370,12 @@ export async function POST(request: Request) {
     const anyFailed = delivery.telegram === 'failed' || delivery.email === 'failed' || delivery.sms === 'failed';
     const status = anySent ? (anyFailed ? 'processed_with_channel_errors' : 'processed') : anyFailed ? 'accepted_with_channel_errors' : 'no_channel_sent';
 
-    if (callNotificationReservation?.dedupeEnabled && callNotificationReservation.shouldSend) {
-      await markCallNotificationProcessed(callNotificationReservation.notificationKey, delivery, status);
+    if (callNotificationReservation?.dedupeEnabled) {
+      await markCallNotificationProcessed(
+        callNotificationReservation.notificationKey,
+        delivery,
+        callNotificationReservation.shouldSend ? status : 'suppressed_same_call'
+      );
     }
 
     if (receipt?.dedupeEnabled) {

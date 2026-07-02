@@ -263,6 +263,44 @@ async function handleExistingNotification({
   };
 }
 
+
+export async function hasHigherPriorityCallEventReceipt(
+  userId: string,
+  payload: any,
+  kind: CallNotificationKind
+): Promise<{ found: boolean; event?: string; reason?: string }> {
+  // Backup guard for the real problem seen in production:
+  // human_escalation.requested can arrive as a separate webhook for the same
+  // callId. Even if the notification receipt table is missing/old, the general
+  // webhook_event_receipts table usually already contains that accepted event.
+  // A plain inbound_call.completed notification must not be sent when a higher
+  // priority event for the same call was already accepted.
+  if (kind !== 'call_completed') return { found: false };
+
+  const groupId = extractCallGroupId(payload);
+  if (!groupId) return { found: false, reason: 'no_call_group' };
+
+  try {
+    const supabase = createServiceSupabaseClient();
+    const { data, error } = await supabase
+      .from('webhook_event_receipts')
+      .select('event,status,last_received_at')
+      .eq('user_id', String(userId))
+      .eq('external_id', groupId)
+      .in('event', ['human_escalation.requested', 'appointment.requested', 'appointment.needed'])
+      .order('last_received_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) return { found: false, reason: error ? error.message : 'not_found' };
+
+    return { found: true, event: String((data as any).event || ''), reason: 'higher_priority_event_receipt_exists' };
+  } catch (error) {
+    console.error('Failed to check higher-priority call event receipts:', error);
+    return { found: false, reason: getErrorMessage(error) };
+  }
+}
+
 /**
  * After a delayed plain call-completed event wakes up, confirm that it still
  * owns the pending reservation. If a higher-priority event upgraded the row,
