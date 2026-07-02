@@ -19,6 +19,16 @@ type ReserveResult = {
   existingEvent?: string;
 };
 
+type ExistingNotificationRow = {
+  id?: number;
+  notification_key?: string;
+  event?: string;
+  kind?: string;
+  priority?: number;
+  status?: string;
+  received_count?: number;
+};
+
 /**
  * Template selection is EVENT-ONLY.
  *
@@ -61,9 +71,9 @@ export function getInboundHoldMs(settings: Record<string, string>, eventName: st
   const raw = Number(settings['dedupe.call_completed_hold_ms'] || '8000');
   if (!Number.isFinite(raw)) return 0;
 
-  // Keep the delay configurable. The default 8 seconds gives the post-call
-  // human_escalation.requested event time to arrive and replace the plain call
-  // notification before it is sent.
+  // Keep the delay configurable. The default gives post-call events like
+  // human_escalation.requested time to arrive and replace the plain call
+  // notification before it is sent. Keep it below common webhook timeouts.
   return Math.max(0, Math.min(15000, Math.round(raw)));
 }
 
@@ -75,17 +85,18 @@ export async function sleep(ms: number) {
 /**
  * Reserve one Email/Telegram notification for one real call.
  *
- * Important behavior:
- * - A plain inbound_call.completed creates a pending reservation first, then waits.
- * - If human_escalation.requested arrives during that wait with the same callId,
- *   it upgrades the reservation and sends the human template.
- * - When the plain call wakes up, it checks the reservation again. If it was
- *   upgraded, it suppresses the plain call email/Telegram.
- * - If a lower-priority or duplicate event arrives after a notification was
- *   already processed, it is suppressed so the user never gets two emails for
- *   the same callId.
+ * This version does NOT depend only on a unique-key insert conflict. It first
+ * searches by (user_id, group_id). That fixes old databases where the unique
+ * constraint was missing or where a previous deployment inserted duplicate
+ * rows. The rule is strict:
  *
- * SMS is intentionally separate and not blocked by this call notification table.
+ *   one user + one callId/conversationId/callSid = one Email/Telegram notice
+ *
+ * Higher-priority events can upgrade a pending lower-priority reservation. If
+ * a notification for the call was already processed, every later event for the
+ * same call is suppressed to avoid two messages.
+ *
+ * SMS is intentionally separate and is not blocked by this call table.
  */
 export async function reserveCallNotification(input: ReserveInput): Promise<ReserveResult> {
   const groupId = extractCallGroupId(input.payload);
@@ -99,6 +110,18 @@ export async function reserveCallNotification(input: ReserveInput): Promise<Rese
 
   try {
     const supabase = createServiceSupabaseClient();
+
+    const existing = await findExistingNotification(supabase, input.userId, groupId);
+    if (existing) {
+      return await handleExistingNotification({
+        supabase,
+        existing,
+        input,
+        groupId,
+        notificationKey,
+        priority,
+      });
+    }
 
     const { error } = await supabase.from('webhook_notification_receipts').insert({
       notification_key: notificationKey,
@@ -119,60 +142,17 @@ export async function reserveCallNotification(input: ReserveInput): Promise<Rese
     }
 
     if ((error as any).code === '23505') {
-      const { data: existing } = await supabase
-        .from('webhook_notification_receipts')
-        .select('event,kind,priority,status,received_count')
-        .eq('notification_key', notificationKey)
-        .maybeSingle();
-
-      const existingPriority = Number((existing as any)?.priority || 0);
-      const existingStatus = String((existing as any)?.status || '');
-      const existingEvent = String((existing as any)?.event || '');
-      const isStillPending = existingStatus === 'reserved';
-
-      // A higher-priority event can replace a pending lower-priority event.
-      // Example: human_escalation.requested replaces inbound_call.completed
-      // while the call-completed request is still waiting.
-      if (priority > existingPriority && isStillPending) {
-        await supabase
-          .from('webhook_notification_receipts')
-          .update({
-            event: input.eventName || 'unknown',
-            kind: input.kind,
-            priority,
-            status: 'reserved',
-            payload: input.payload || null,
-            received_count: ((existing as any)?.received_count || 1) + 1,
-            last_received_at: new Date().toISOString(),
-          })
-          .eq('notification_key', notificationKey);
-
-        return {
-          dedupeEnabled: true,
-          shouldSend: true,
-          notificationKey,
+      const conflictExisting = await findExistingNotification(supabase, input.userId, groupId, notificationKey);
+      if (conflictExisting) {
+        return await handleExistingNotification({
+          supabase,
+          existing: conflictExisting,
+          input,
           groupId,
-          reason: 'upgraded_pending_notification',
-          existingEvent,
-        };
+          notificationKey,
+          priority,
+        });
       }
-
-      await supabase
-        .from('webhook_notification_receipts')
-        .update({
-          received_count: ((existing as any)?.received_count || 1) + 1,
-          last_received_at: new Date().toISOString(),
-        })
-        .eq('notification_key', notificationKey);
-
-      return {
-        dedupeEnabled: true,
-        shouldSend: false,
-        notificationKey,
-        groupId,
-        reason: existingStatus === 'reserved' ? 'lower_or_same_priority_pending' : 'same_call_already_notified',
-        existingEvent,
-      };
     }
 
     console.error('Call notification dedupe insert failed:', error);
@@ -181,6 +161,106 @@ export async function reserveCallNotification(input: ReserveInput): Promise<Rese
     console.error('Call notification dedupe unavailable:', error);
     return { dedupeEnabled: false, shouldSend: true, notificationKey, groupId, reason: getErrorMessage(error) };
   }
+}
+
+async function findExistingNotification(
+  supabase: any,
+  userId: string,
+  groupId: string,
+  notificationKey?: string
+): Promise<ExistingNotificationRow | null> {
+  // Prefer the real call grouping. This catches old rows even if their
+  // notification_key differs because of earlier code versions.
+  const { data, error } = await supabase
+    .from('webhook_notification_receipts')
+    .select('id,notification_key,event,kind,priority,status,received_count')
+    .eq('user_id', String(userId))
+    .eq('group_id', groupId)
+    .order('priority', { ascending: false })
+    .order('last_received_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!error && data) return data as ExistingNotificationRow;
+
+  if (!notificationKey) return null;
+
+  const byKey = await supabase
+    .from('webhook_notification_receipts')
+    .select('id,notification_key,event,kind,priority,status,received_count')
+    .eq('notification_key', notificationKey)
+    .maybeSingle();
+
+  if (!byKey.error && byKey.data) return byKey.data as ExistingNotificationRow;
+  return null;
+}
+
+async function handleExistingNotification({
+  supabase,
+  existing,
+  input,
+  groupId,
+  notificationKey,
+  priority,
+}: {
+  supabase: any;
+  existing: ExistingNotificationRow;
+  input: ReserveInput;
+  groupId: string;
+  notificationKey: string;
+  priority: number;
+}): Promise<ReserveResult> {
+  const existingPriority = Number(existing.priority || 0);
+  const existingStatus = String(existing.status || '');
+  const existingEvent = String(existing.event || '');
+  const existingKey = String(existing.notification_key || notificationKey);
+  const isStillPending = existingStatus === 'reserved';
+  const selector = existing.id ? { column: 'id', value: existing.id } : { column: 'notification_key', value: existingKey };
+
+  // A higher-priority event can replace a pending lower-priority event.
+  // Example: human_escalation.requested replaces inbound_call.completed while
+  // the call-completed request is still sleeping.
+  if (priority > existingPriority && isStillPending) {
+    await supabase
+      .from('webhook_notification_receipts')
+      .update({
+        notification_key: existingKey,
+        event: input.eventName || 'unknown',
+        kind: input.kind,
+        priority,
+        status: 'reserved',
+        payload: input.payload || null,
+        received_count: Number(existing.received_count || 1) + 1,
+        last_received_at: new Date().toISOString(),
+      })
+      .eq(selector.column, selector.value);
+
+    return {
+      dedupeEnabled: true,
+      shouldSend: true,
+      notificationKey: existingKey,
+      groupId,
+      reason: 'upgraded_pending_notification',
+      existingEvent,
+    };
+  }
+
+  await supabase
+    .from('webhook_notification_receipts')
+    .update({
+      received_count: Number(existing.received_count || 1) + 1,
+      last_received_at: new Date().toISOString(),
+    })
+    .eq(selector.column, selector.value);
+
+  return {
+    dedupeEnabled: true,
+    shouldSend: false,
+    notificationKey: existingKey,
+    groupId,
+    reason: existingStatus === 'reserved' ? 'lower_or_same_priority_pending' : 'same_call_already_notified',
+    existingEvent,
+  };
 }
 
 /**
