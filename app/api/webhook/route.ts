@@ -210,11 +210,23 @@ export async function POST(request: Request) {
         if (smartAnalysis.reasonDe) delivery.ai_human_support_reason = smartAnalysis.reasonDe;
 
         if (smartAnalysis.needsHumanSupport) {
-          notificationKind = 'human_escalation';
-          delivery.kind = notificationKind;
+          if (eventName === 'inbound_call.completed' || eventName === 'outbound_call.completed') {
+            // IMPORTANT: Do not send a Human template from the plain completed-call event.
+            // If a dedicated human_escalation.requested webhook is enabled, that event is
+            // the one that should notify the team. Sending from inbound_call.completed too
+            // is exactly what created duplicate Human notifications. This guard works even
+            // if the database dedupe tables/migrations are missing or delayed.
+            callNotificationReservation.shouldSend = false;
+            delivery.call_notification = 'suppressed_completed_call_ai_detected_human_support_wait_for_human_event';
+            delivery.email = 'suppressed_same_call';
+            delivery.telegram = 'suppressed_same_call';
+          } else {
+            notificationKind = 'human_escalation';
+            delivery.kind = notificationKind;
+          }
         }
 
-        if ((settings['translation.translate_transcript'] || 'false') === 'true') {
+        if (callNotificationReservation.shouldSend && (settings['translation.translate_transcript'] || 'false') === 'true') {
           // The smart OpenAI call already translated the summary. If the admin
           // also wants the transcript translated, translate only the transcript
           // here to avoid paying to translate the summary twice.
