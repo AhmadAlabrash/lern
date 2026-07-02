@@ -12,7 +12,7 @@ import { translateWebhookPayloadToGerman } from '@/lib/translate';
 import { analyzeCompletedCallWithOpenAI } from '@/lib/call-ai';
 import { createWebhookReceipt, markWebhookReceiptProcessed } from '@/lib/webhook-dedupe';
 import { extractCallGroupId, getCallNotificationKind, sleep } from '@/lib/call-notification-dedupe';
-import { claimCallCompletedGuard, claimHumanEscalationGuard, isCallBlockedByHumanOrSent, prepareCallCompletedGuard } from '@/lib/call-notification-guard';
+import { hasHumanEscalationSignal, storeHumanEscalationSignal } from '@/lib/human-escalation-signal';
 
 export const maxDuration = 30;
 
@@ -97,18 +97,52 @@ export async function POST(request: Request) {
       'ai.human_support_confidence_threshold',
       'deepl.api_key',
       'deepl.api_url',
+      'dedupe.human_signal_settle_ms',
       'dedupe.call_notification_settle_ms',
       'dedupe.call_completed_hold_ms',
     ]);
 
     const originalKind = getCallNotificationKind(eventName, payload);
+    const callGroupId = extractCallGroupId(payload);
     const delivery: DeliveryMap = {
       event: eventName || 'unknown',
       kind: originalKind,
+      call_group_id: callGroupId || '',
       telegram: 'skipped',
       email: 'skipped',
       sms: 'skipped',
     };
+
+    /**
+     * IMPORTANT FLOW:
+     * human_escalation.requested is a SIGNAL ONLY.
+     * It never sends Email/Telegram by itself. That removes the duplicate source.
+     * inbound_call.completed is the only event that sends the final call notification.
+     */
+    if (originalKind === 'human_escalation' && callGroupId) {
+      const signal = await storeHumanEscalationSignal({
+        userId: String(user.id),
+        groupId: callGroupId,
+        eventName,
+        payload,
+      });
+
+      delivery.human_signal = signal.reason;
+      delivery.telegram = user.notify_telegram === false ? 'disabled_for_user' : 'signal_only_no_notification';
+      delivery.email = user.notify_email === false ? 'disabled_for_user' : 'signal_only_no_notification';
+      delivery.sms = user.notify_sms === true ? 'signal_only_no_sms' : 'disabled_for_user';
+
+      if (receipt?.dedupeEnabled) {
+        await markWebhookReceiptProcessed(receipt.dedupKey, delivery, signal.stored ? 'human_signal_stored' : 'human_signal_store_failed');
+      }
+
+      return NextResponse.json({
+        success: true,
+        accepted: true,
+        status: signal.stored ? 'human_signal_stored' : 'human_signal_store_failed',
+        delivery,
+      });
+    }
 
     const originalTelegramAllowed =
       user.notify_telegram !== false &&
@@ -120,83 +154,39 @@ export async function POST(request: Request) {
       shouldDeliverForEvent(settings['routing.email_events'], eventName) &&
       Boolean(user.email);
 
-    const callGroupId = extractCallGroupId(payload);
-    const shouldUseCallGuard =
-      Boolean(callGroupId) &&
-      (originalKind === 'call_completed' || originalKind === 'human_escalation') &&
-      (originalTelegramAllowed || originalEmailAllowed);
-
     let shouldSendEmailTelegram = originalTelegramAllowed || originalEmailAllowed;
-    let notificationEventName = eventName;
+    const notificationEventName = eventName;
     let notificationKind = originalKind;
     let notificationPayload = payload;
-    let needsFinalCallGuardClaim = false;
 
-    if (shouldUseCallGuard && callGroupId) {
-      if (originalKind === 'human_escalation') {
-        const guard = await claimHumanEscalationGuard({
-          userId: String(user.id),
-          groupId: callGroupId,
-          eventName,
-          kind: originalKind,
-          payload,
-        });
-
-        delivery.call_guard = guard.reason;
-        shouldSendEmailTelegram = guard.shouldSend;
-      }
-
-      if (originalKind === 'call_completed') {
-        const prepared = await prepareCallCompletedGuard({
-          userId: String(user.id),
-          groupId: callGroupId,
-          eventName,
-          kind: originalKind,
-          payload,
-        });
-
-        delivery.call_guard = prepared.reason;
-
-        if (!prepared.shouldSend) {
-          shouldSendEmailTelegram = false;
-        } else {
-          const settleMs = getCallNotificationSettleMs(settings);
-          await sleep(settleMs);
-          delivery.call_guard_wait_ms = String(settleMs);
-
-          const afterWait = await isCallBlockedByHumanOrSent(String(user.id), callGroupId);
-          delivery.call_guard_after_wait = afterWait.reason;
-
-          if (!afterWait.shouldSend) {
-            shouldSendEmailTelegram = false;
-          } else {
-            shouldSendEmailTelegram = true;
-            needsFinalCallGuardClaim = true;
-          }
-        }
-      }
-    }
-
-    if (shouldSendEmailTelegram) {
-      const smartAnalysis = await analyzeCompletedCallWithOpenAI(
+    /**
+     * For completed call events, wait briefly for a human_escalation signal.
+     * OpenAI analysis starts in parallel with the wait, so the total delay stays low.
+     */
+    if (shouldSendEmailTelegram && originalKind === 'call_completed' && callGroupId) {
+      const analysisPromise = analyzeCompletedCallWithOpenAI(
         notificationPayload,
         settings,
         notificationEventName,
         notificationKind
       );
 
+      const settleMs = getHumanSignalSettleMs(settings);
+      await sleep(settleMs);
+      delivery.human_signal_wait_ms = String(settleMs);
+
+      const [humanSignal, smartAnalysis] = await Promise.all([
+        hasHumanEscalationSignal(String(user.id), callGroupId),
+        analysisPromise,
+      ]);
+
+      delivery.human_signal = humanSignal.reason;
+
       if (smartAnalysis.used) {
         notificationPayload = smartAnalysis.payload;
         delivery.ai_human_support = smartAnalysis.needsHumanSupport ? 'yes' : 'no';
         delivery.ai_human_support_confidence = smartAnalysis.confidence !== undefined ? String(smartAnalysis.confidence) : '';
         if (smartAnalysis.reasonDe) delivery.ai_human_support_reason = smartAnalysis.reasonDe;
-
-        // If no dedicated human_escalation event arrived during the wait window,
-        // OpenAI may still choose the Human template for this one final notification.
-        if (smartAnalysis.needsHumanSupport && notificationKind === 'call_completed') {
-          notificationKind = 'human_escalation';
-          delivery.notification_kind = notificationKind;
-        }
 
         if ((settings['translation.translate_transcript'] || 'false') === 'true') {
           notificationPayload = await translateWebhookPayloadToGerman(notificationPayload, {
@@ -208,24 +198,15 @@ export async function POST(request: Request) {
         if (smartAnalysis.error) delivery.ai_human_support = `not_used_${smartAnalysis.error}`.slice(0, 180);
         notificationPayload = await translateWebhookPayloadToGerman(notificationPayload, settings);
       }
-    }
 
-    if (needsFinalCallGuardClaim && callGroupId && shouldSendEmailTelegram) {
-      const finalGuard = await claimCallCompletedGuard(
-        {
-          userId: String(user.id),
-          groupId: callGroupId,
-          eventName: notificationEventName,
-          kind: originalKind,
-          payload: notificationPayload,
-        },
-        notificationKind
-      );
-
-      delivery.call_guard_final = finalGuard.reason;
-      if (!finalGuard.shouldSend) {
-        shouldSendEmailTelegram = false;
+      if (humanSignal.exists || smartAnalysis.needsHumanSupport) {
+        notificationKind = 'human_escalation';
+        delivery.notification_kind = humanSignal.exists ? 'human_escalation_signal' : 'human_escalation_openai';
+      } else {
+        delivery.notification_kind = 'call_completed';
       }
+    } else if (shouldSendEmailTelegram) {
+      notificationPayload = await translateWebhookPayloadToGerman(notificationPayload, settings);
     }
 
     const phone = extractPhoneFromWebhook(notificationPayload);
@@ -241,7 +222,7 @@ export async function POST(request: Request) {
       } else if (!user.telegram_chat_id) {
         delivery.telegram = 'missing_chat_id';
       } else if (!shouldSendEmailTelegram) {
-        delivery.telegram = 'suppressed_same_call';
+        delivery.telegram = 'suppressed';
       } else {
         try {
           await sendTelegramMessage(user.telegram_chat_id, telegramMessage, callButton);
@@ -273,7 +254,7 @@ export async function POST(request: Request) {
       } else if (!user.email) {
         delivery.email = 'missing_email';
       } else if (!shouldSendEmailTelegram) {
-        delivery.email = 'suppressed_same_call';
+        delivery.email = 'suppressed';
       } else {
         try {
           await sendWebhookNotificationEmail(user.email, emailMessage, phone);
@@ -288,9 +269,7 @@ export async function POST(request: Request) {
       delivery.email = 'disabled_for_user';
     }
 
-    // SMS stays event-based and independent from the one-call Email/Telegram queue.
-    // This keeps appointment.requested SMS working even when call notifications are
-    // suppressed or merged.
+    // SMS stays event-based and independent.
     if (user.notify_sms === true) {
       if (!shouldDeliverForEvent(settings['routing.sms_events'], eventName)) {
         delivery.sms = 'event_not_enabled';
@@ -365,10 +344,16 @@ export async function POST(request: Request) {
   }
 }
 
-function getCallNotificationSettleMs(settings: Record<string, string>) {
-  const raw = Number(settings['dedupe.call_notification_settle_ms'] || settings['dedupe.call_completed_hold_ms'] || '10000');
-  if (!Number.isFinite(raw)) return 10000;
-  return Math.max(3000, Math.min(14000, Math.round(raw)));
+function getHumanSignalSettleMs(settings: Record<string, string>) {
+  const raw = Number(
+    settings['dedupe.human_signal_settle_ms'] ||
+      settings['dedupe.call_notification_settle_ms'] ||
+      settings['dedupe.call_completed_hold_ms'] ||
+      '12000'
+  );
+
+  if (!Number.isFinite(raw)) return 12000;
+  return Math.max(2000, Math.min(20000, Math.round(raw)));
 }
 
 function selectNotificationTemplate(settings: Record<string, string>, channel: 'telegram' | 'email', kind: string) {
